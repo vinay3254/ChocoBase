@@ -158,6 +158,37 @@ impl<'a> BTree<'a> {
         self.insert_into_parent(path, parent_no, promote.key, right_no)
     }
 
+    pub fn cursor_start(&mut self) -> Result<crate::btree::cursor::Cursor, BTreeError> {
+        let mut current = self.root;
+        loop {
+            let page = self.pager.get_page(current)?;
+            match page.page_type() {
+                crate::storage::page::PAGE_TYPE_LEAF => break,
+                crate::storage::page::PAGE_TYPE_INTERNAL => {
+                    let node = InternalNode::decode(page);
+                    current = node.entries.first().map(|e| e.left_child).unwrap_or(node.rightmost_child);
+                }
+                t => {
+                    return Err(BTreeError::Storage(StorageError::CorruptPage(
+                        current,
+                        format!("unexpected page type {t}"),
+                    )))
+                }
+            }
+        }
+        let page = self.pager.get_page(current)?;
+        let node = LeafNode::decode(page);
+        Ok(crate::btree::cursor::Cursor::from_leaf(node.entries, 0, node.next_leaf))
+    }
+
+    pub fn cursor_seek(&mut self, key: &[u8]) -> Result<crate::btree::cursor::Cursor, BTreeError> {
+        let (_, leaf_no) = self.descend(key)?;
+        let page = self.pager.get_page(leaf_no)?;
+        let node = LeafNode::decode(page);
+        let start_idx = node.entries.partition_point(|e| e.key.as_slice() < key);
+        Ok(crate::btree::cursor::Cursor::from_leaf(node.entries, start_idx, node.next_leaf))
+    }
+
     pub fn check_invariants(&mut self) -> Result<(), String> {
         self.check_node(self.root, None, None).map(|_| ())
     }
