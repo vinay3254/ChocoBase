@@ -55,6 +55,7 @@ impl Parser {
             Token::Create => self.parse_create()?,
             Token::Drop => self.parse_drop()?,
             Token::Insert => self.parse_insert()?,
+            Token::Select => self.parse_select()?,
             _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected a statement".into() }),
         };
         if matches!(self.peek(), Token::Semicolon) {
@@ -180,10 +181,109 @@ impl Parser {
     }
 
     fn parse_where_expr(&mut self) -> Result<Expr, ParseError> {
-        // Full precedence-climbing implementation lands in Task 22; for now this
-        // only needs to support parenthesized literal/column expressions used by
-        // parse_primary_expr's `LParen` arm, so delegate straight to primary.
-        self.parse_primary_expr()
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_and()?;
+        while matches!(self.peek(), Token::Or) {
+            self.advance();
+            let right = self.parse_and()?;
+            left = Expr::BinaryOp { op: BinOp::Or, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    fn parse_and(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_comparison()?;
+        while matches!(self.peek(), Token::And) {
+            self.advance();
+            let right = self.parse_comparison()?;
+            left = Expr::BinaryOp { op: BinOp::And, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
+        let left = self.parse_primary_expr()?;
+        match self.peek() {
+            Token::Eq | Token::NotEq | Token::Lt | Token::LtEq | Token::Gt | Token::GtEq => {
+                let op = match self.advance() {
+                    Token::Eq => BinOp::Eq,
+                    Token::NotEq => BinOp::NotEq,
+                    Token::Lt => BinOp::Lt,
+                    Token::LtEq => BinOp::LtEq,
+                    Token::Gt => BinOp::Gt,
+                    Token::GtEq => BinOp::GtEq,
+                    _ => unreachable!(),
+                };
+                let right = self.parse_primary_expr()?;
+                Ok(Expr::BinaryOp { op, left: Box::new(left), right: Box::new(right) })
+            }
+            Token::Is => {
+                self.advance();
+                let negated = if matches!(self.peek(), Token::Not) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                self.expect(&Token::Null)?;
+                Ok(Expr::IsNull { expr: Box::new(left), negated })
+            }
+            _ => Ok(left),
+        }
+    }
+
+    fn parse_select(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Select)?;
+        let columns = if matches!(self.peek(), Token::Star) {
+            self.advance();
+            SelectColumns::All
+        } else {
+            let mut cols = vec![self.expect_identifier()?];
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                cols.push(self.expect_identifier()?);
+            }
+            SelectColumns::List(cols)
+        };
+        self.expect(&Token::From)?;
+        let table = self.expect_identifier()?;
+
+        let where_clause = if matches!(self.peek(), Token::Where) {
+            self.advance();
+            Some(self.parse_where_expr()?)
+        } else {
+            None
+        };
+
+        let order_by = if matches!(self.peek(), Token::Order) {
+            self.advance();
+            self.expect(&Token::By)?;
+            let col = self.expect_identifier()?;
+            let desc = match self.peek() {
+                Token::Desc => { self.advance(); true }
+                Token::Asc => { self.advance(); false }
+                _ => false,
+            };
+            Some((col, desc))
+        } else {
+            None
+        };
+
+        let limit = if matches!(self.peek(), Token::Limit) {
+            self.advance();
+            let offset = self.peek_offset();
+            match self.advance() {
+                Token::IntLiteral(n) => Some(n),
+                other => return Err(ParseError::Syntax { offset, message: format!("expected integer after LIMIT, found {other:?}") }),
+            }
+        } else {
+            None
+        };
+
+        Ok(Statement::Select { columns, table, where_clause, order_by, limit })
     }
 }
 
@@ -250,5 +350,49 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn parses_select_star_with_where_and_precedence() {
+        // Confirms AND binds tighter than OR: `a OR b AND c` parses as `a OR (b AND c)`.
+        let stmt = parse("SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3").unwrap();
+        match stmt {
+            Statement::Select { where_clause: Some(Expr::BinaryOp { op: BinOp::Or, left, right }), .. } => {
+                assert_eq!(*left, Expr::BinaryOp {
+                    op: BinOp::Eq,
+                    left: Box::new(Expr::Column("a".into())),
+                    right: Box::new(Expr::IntLiteral(1)),
+                });
+                assert!(matches!(*right, Expr::BinaryOp { op: BinOp::And, .. }));
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_select_with_is_null() {
+        let stmt = parse("SELECT id FROM t WHERE name IS NOT NULL").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Select {
+                columns: SelectColumns::List(vec!["id".into()]),
+                table: "t".into(),
+                where_clause: Some(Expr::IsNull { expr: Box::new(Expr::Column("name".into())), negated: true }),
+                order_by: None,
+                limit: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_select_with_order_by_and_limit() {
+        let stmt = parse("SELECT * FROM t ORDER BY id DESC LIMIT 10").unwrap();
+        match stmt {
+            Statement::Select { order_by, limit, .. } => {
+                assert_eq!(order_by, Some(("id".into(), true)));
+                assert_eq!(limit, Some(10));
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
     }
 }
