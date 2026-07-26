@@ -234,15 +234,19 @@ mod tests {
     fn inserting_enough_keys_splits_root_and_changes_it() {
         let (mut pager, root) = empty_tree();
         let mut bt = BTree::new(&mut pager, root);
-        for i in 0..400i64 {
-            bt.insert(&(i as u64).to_be_bytes(), format!("row-{i}").as_bytes()).unwrap();
+        // Large keys (~700 bytes) mean a leaf or internal node fills after only
+        // ~5 entries, so a multi-level split cascade (through split_internal)
+        // is reached in well under 100 inserts, instead of needing tens of
+        // thousands of small sequential keys to overflow a 255-entry internal
+        // root. The zero-padded numeric prefix preserves ascending order.
+        for i in 0..100i32 {
+            let key = format!("{i:06}{}", "x".repeat(700)).into_bytes();
+            bt.insert(&key, b"v").unwrap();
         }
         assert_ne!(bt.root(), root, "enough inserts must force at least one split");
-        for i in 0..400i64 {
-            assert_eq!(
-                bt.search(&(i as u64).to_be_bytes()).unwrap(),
-                Some(format!("row-{i}").into_bytes())
-            );
+        for i in 0..100i32 {
+            let key = format!("{i:06}{}", "x".repeat(700)).into_bytes();
+            assert_eq!(bt.search(&key).unwrap(), Some(b"v".to_vec()));
         }
     }
 }
