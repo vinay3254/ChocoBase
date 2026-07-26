@@ -644,6 +644,13 @@ mod tests {
     }
 
     proptest! {
+        // Each case runs up to 400 insert/delete ops with a full check_invariants()
+        // tree walk after every single one -- genuinely thorough, but at the
+        // default 256 cases this test alone took ~118s, and cargo test (unscoped)
+        // still runs 7 more times across the rest of this project's plan. 48
+        // cases keeps real random coverage (still far more than any single
+        // hand-written scenario) while cutting this to roughly 15-20s.
+        #![proptest_config(ProptestConfig::with_cases(48))]
         #[test]
         fn insert_delete_sequence_stays_consistent(
             ops in pvec((0u32..200, any::<bool>()), 1..400)
