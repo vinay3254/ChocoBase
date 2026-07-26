@@ -354,8 +354,106 @@ impl<'a> BTree<'a> {
         self.rebalance_internal(path, parent_no)
     }
 
-    fn rebalance_internal(&mut self, _path: Vec<u32>, _node_no: u32) -> Result<(), BTreeError> {
-        unimplemented!("implemented in Task 15")
+    fn rebalance_internal(&mut self, mut path: Vec<u32>, node_no: u32) -> Result<(), BTreeError> {
+        if node_no == self.root {
+            let node = InternalNode::decode(self.pager.get_page(node_no)?);
+            if node.entries.is_empty() {
+                self.root = node.rightmost_child;
+            }
+            return Ok(());
+        }
+        let node = InternalNode::decode(self.pager.get_page(node_no)?);
+        if node.entries.len() >= Self::MIN_ENTRIES {
+            return Ok(());
+        }
+        let parent_no = path.pop().unwrap();
+        let (left_sib, right_sib) = self.find_siblings(parent_no, node_no)?;
+
+        if let Some(right_no) = right_sib {
+            let right = InternalNode::decode(self.pager.get_page(right_no)?);
+            if right.entries.len() > Self::MIN_ENTRIES {
+                return self.borrow_from_right_internal(parent_no, node_no, right_no);
+            }
+        }
+        if let Some(left_no) = left_sib {
+            let left = InternalNode::decode(self.pager.get_page(left_no)?);
+            if left.entries.len() > Self::MIN_ENTRIES {
+                return self.borrow_from_left_internal(parent_no, left_no, node_no);
+            }
+        }
+        if let Some(right_no) = right_sib {
+            return self.merge_internal(path, parent_no, node_no, right_no);
+        }
+        if let Some(left_no) = left_sib {
+            return self.merge_internal(path, parent_no, left_no, node_no);
+        }
+        Ok(())
+    }
+
+    fn borrow_from_right_internal(&mut self, parent_no: u32, node_no: u32, right_no: u32) -> Result<(), BTreeError> {
+        let mut node = InternalNode::decode(self.pager.get_page(node_no)?);
+        let mut right = InternalNode::decode(self.pager.get_page(right_no)?);
+        let page = self.pager.get_page(parent_no)?;
+        let mut parent = InternalNode::decode(page);
+        let sep_idx = parent.entries.iter().position(|e| e.left_child == node_no).unwrap();
+        let sep_key = parent.entries[sep_idx].key.clone();
+
+        let moved = right.entries.remove(0);
+        node.entries.push(InternalEntry { key: sep_key, left_child: node.rightmost_child });
+        node.rightmost_child = moved.left_child;
+        parent.entries[sep_idx].key = moved.key;
+
+        node.encode(self.pager.get_page_mut(node_no)?);
+        right.encode(self.pager.get_page_mut(right_no)?);
+        parent.encode(self.pager.get_page_mut(parent_no)?);
+        Ok(())
+    }
+
+    fn borrow_from_left_internal(&mut self, parent_no: u32, left_no: u32, node_no: u32) -> Result<(), BTreeError> {
+        let mut left = InternalNode::decode(self.pager.get_page(left_no)?);
+        let mut node = InternalNode::decode(self.pager.get_page(node_no)?);
+        let page = self.pager.get_page(parent_no)?;
+        let mut parent = InternalNode::decode(page);
+        let sep_idx = parent.entries.iter().position(|e| e.left_child == left_no).unwrap();
+        let sep_key = parent.entries[sep_idx].key.clone();
+
+        let moved_child = left.rightmost_child;
+        let last_entry = left.entries.pop().unwrap();
+        left.rightmost_child = last_entry.left_child;
+
+        node.entries.insert(0, InternalEntry { key: sep_key, left_child: moved_child });
+        parent.entries[sep_idx].key = last_entry.key;
+
+        left.encode(self.pager.get_page_mut(left_no)?);
+        node.encode(self.pager.get_page_mut(node_no)?);
+        parent.encode(self.pager.get_page_mut(parent_no)?);
+        Ok(())
+    }
+
+    fn merge_internal(&mut self, path: Vec<u32>, parent_no: u32, left_no: u32, right_no: u32) -> Result<(), BTreeError> {
+        let mut left = InternalNode::decode(self.pager.get_page(left_no)?);
+        let right = InternalNode::decode(self.pager.get_page(right_no)?);
+        let page = self.pager.get_page(parent_no)?;
+        let mut parent = InternalNode::decode(page);
+        let sep_idx = parent.entries.iter().position(|e| e.left_child == left_no).unwrap();
+        let sep_key = parent.entries[sep_idx].key.clone();
+
+        left.entries.push(InternalEntry { key: sep_key, left_child: left.rightmost_child });
+        left.entries.extend(right.entries);
+        left.rightmost_child = right.rightmost_child;
+        left.encode(self.pager.get_page_mut(left_no)?);
+        self.pager.free_page(right_no)?;
+
+        parent.entries.remove(sep_idx);
+        if parent.rightmost_child == right_no {
+            parent.rightmost_child = left_no;
+        } else {
+            let j = parent.entries.iter().position(|e| e.left_child == right_no).unwrap();
+            parent.entries[j].left_child = left_no;
+        }
+        parent.encode(self.pager.get_page_mut(parent_no)?);
+
+        self.rebalance_internal(path, parent_no)
     }
 }
 
