@@ -235,6 +235,128 @@ impl<'a> BTree<'a> {
             t => Err(format!("page {page_no}: unexpected page type {t}")),
         }
     }
+
+    const MIN_ENTRIES: usize = 2;
+
+    pub fn delete(&mut self, key: &[u8]) -> Result<bool, BTreeError> {
+        let (path, leaf_no) = self.descend(key)?;
+        let page = self.pager.get_page(leaf_no)?;
+        let mut node = LeafNode::decode(page);
+        let pos = match node.entries.iter().position(|e| e.key.as_slice() == key) {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+        node.entries.remove(pos);
+        node.encode(self.pager.get_page_mut(leaf_no)?);
+
+        if path.is_empty() {
+            return Ok(true);
+        }
+        self.rebalance_leaf(path, leaf_no)?;
+        Ok(true)
+    }
+
+    fn find_siblings(&mut self, parent_no: u32, child_no: u32) -> Result<(Option<u32>, Option<u32>), BTreeError> {
+        let page = self.pager.get_page(parent_no)?;
+        let parent = InternalNode::decode(page);
+        let children: Vec<u32> = parent
+            .entries
+            .iter()
+            .map(|e| e.left_child)
+            .chain(std::iter::once(parent.rightmost_child))
+            .collect();
+        let idx = children.iter().position(|&c| c == child_no).expect("child must belong to parent");
+        let left = if idx > 0 { Some(children[idx - 1]) } else { None };
+        let right = if idx + 1 < children.len() { Some(children[idx + 1]) } else { None };
+        Ok((left, right))
+    }
+
+    fn update_separator(&mut self, parent_no: u32, left_child: u32, new_key: Vec<u8>) -> Result<(), BTreeError> {
+        let page = self.pager.get_page(parent_no)?;
+        let mut parent = InternalNode::decode(page);
+        let i = parent.entries.iter().position(|e| e.left_child == left_child).unwrap();
+        parent.entries[i].key = new_key;
+        parent.encode(self.pager.get_page_mut(parent_no)?);
+        Ok(())
+    }
+
+    fn rebalance_leaf(&mut self, mut path: Vec<u32>, node_no: u32) -> Result<(), BTreeError> {
+        let node = LeafNode::decode(self.pager.get_page(node_no)?);
+        if node.entries.len() >= Self::MIN_ENTRIES {
+            return Ok(());
+        }
+        let parent_no = path.pop().unwrap();
+        let (left_sib, right_sib) = self.find_siblings(parent_no, node_no)?;
+
+        if let Some(right_no) = right_sib {
+            let right = LeafNode::decode(self.pager.get_page(right_no)?);
+            if right.entries.len() > Self::MIN_ENTRIES {
+                return self.borrow_from_right_leaf(parent_no, node_no, right_no);
+            }
+        }
+        if let Some(left_no) = left_sib {
+            let left = LeafNode::decode(self.pager.get_page(left_no)?);
+            if left.entries.len() > Self::MIN_ENTRIES {
+                return self.borrow_from_left_leaf(parent_no, left_no, node_no);
+            }
+        }
+        if let Some(right_no) = right_sib {
+            return self.merge_leaves(path, parent_no, node_no, right_no);
+        }
+        if let Some(left_no) = left_sib {
+            return self.merge_leaves(path, parent_no, left_no, node_no);
+        }
+        Ok(())
+    }
+
+    fn borrow_from_right_leaf(&mut self, parent_no: u32, node_no: u32, right_no: u32) -> Result<(), BTreeError> {
+        let mut node = LeafNode::decode(self.pager.get_page(node_no)?);
+        let mut right = LeafNode::decode(self.pager.get_page(right_no)?);
+        let moved = right.entries.remove(0);
+        let new_separator = right.entries[0].key.clone();
+        node.entries.push(moved);
+        node.encode(self.pager.get_page_mut(node_no)?);
+        right.encode(self.pager.get_page_mut(right_no)?);
+        self.update_separator(parent_no, node_no, new_separator)
+    }
+
+    fn borrow_from_left_leaf(&mut self, parent_no: u32, left_no: u32, node_no: u32) -> Result<(), BTreeError> {
+        let mut left = LeafNode::decode(self.pager.get_page(left_no)?);
+        let mut node = LeafNode::decode(self.pager.get_page(node_no)?);
+        let moved = left.entries.pop().unwrap();
+        let new_separator = moved.key.clone();
+        node.entries.insert(0, moved);
+        left.encode(self.pager.get_page_mut(left_no)?);
+        node.encode(self.pager.get_page_mut(node_no)?);
+        self.update_separator(parent_no, left_no, new_separator)
+    }
+
+    fn merge_leaves(&mut self, path: Vec<u32>, parent_no: u32, left_no: u32, right_no: u32) -> Result<(), BTreeError> {
+        let mut left = LeafNode::decode(self.pager.get_page(left_no)?);
+        let right = LeafNode::decode(self.pager.get_page(right_no)?);
+        left.entries.extend(right.entries);
+        left.next_leaf = right.next_leaf;
+        left.encode(self.pager.get_page_mut(left_no)?);
+        self.pager.free_page(right_no)?;
+
+        let page = self.pager.get_page(parent_no)?;
+        let mut parent = InternalNode::decode(page);
+        let i = parent.entries.iter().position(|e| e.left_child == left_no).unwrap();
+        parent.entries.remove(i);
+        if parent.rightmost_child == right_no {
+            parent.rightmost_child = left_no;
+        } else {
+            let j = parent.entries.iter().position(|e| e.left_child == right_no).unwrap();
+            parent.entries[j].left_child = left_no;
+        }
+        parent.encode(self.pager.get_page_mut(parent_no)?);
+
+        self.rebalance_internal(path, parent_no)
+    }
+
+    fn rebalance_internal(&mut self, _path: Vec<u32>, _node_no: u32) -> Result<(), BTreeError> {
+        unimplemented!("implemented in Task 15")
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +416,44 @@ mod tests {
         LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root).unwrap());
         pager.flush().unwrap();
         (pager, root)
+    }
+
+    #[test]
+    fn delete_removes_key_from_single_leaf() {
+        let (mut pager, root) = empty_tree();
+        let mut bt = BTree::new(&mut pager, root);
+        bt.insert(&[1], b"a").unwrap();
+        bt.insert(&[2], b"b").unwrap();
+        assert!(bt.delete(&[1]).unwrap());
+        assert_eq!(bt.search(&[1]).unwrap(), None);
+        assert_eq!(bt.search(&[2]).unwrap(), Some(b"b".to_vec()));
+    }
+
+    #[test]
+    fn delete_missing_key_returns_false() {
+        let (mut pager, root) = empty_tree();
+        let mut bt = BTree::new(&mut pager, root);
+        bt.insert(&[1], b"a").unwrap();
+        assert!(!bt.delete(&[99]).unwrap());
+    }
+
+    #[test]
+    fn delete_causing_leaf_underflow_borrows_or_merges_and_stays_valid() {
+        let (mut pager, root) = empty_tree();
+        let mut bt = BTree::new(&mut pager, root);
+        for i in 0..300u32 {
+            bt.insert(&i.to_be_bytes(), b"v").unwrap();
+        }
+        for i in 0..250u32 {
+            assert!(bt.delete(&i.to_be_bytes()).unwrap());
+        }
+        bt.check_invariants().unwrap();
+        for i in 0..250u32 {
+            assert_eq!(bt.search(&i.to_be_bytes()).unwrap(), None);
+        }
+        for i in 250..300u32 {
+            assert_eq!(bt.search(&i.to_be_bytes()).unwrap(), Some(b"v".to_vec()));
+        }
     }
 
     #[test]
