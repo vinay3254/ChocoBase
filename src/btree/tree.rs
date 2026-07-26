@@ -643,13 +643,31 @@ mod tests {
         }
     }
 
+    // Zero-padded numeric prefix preserves ordering, and the ~700-byte tail
+    // caps a leaf at ~5 entries so splits/merges/borrows/root-collapse are
+    // actually reachable within a couple hundred ops -- same technique as
+    // Tasks 10/14/15's fixed tests. Plain 4-byte keys (k.to_be_bytes()) never
+    // exceed ~11 bytes/entry, so even 200+ of them fit in a single 4096-byte
+    // root leaf and never split at all, which is what the first version of
+    // this property test used -- it passed, but never exercised any of the
+    // split/merge/borrow/root-collapse code Tasks 9-15 built (caught by
+    // Task 16's reviewer, who worked out the exact byte-size bound proving
+    // it structurally could not split, not just that it happened not to).
+    fn padded_key(k: u32) -> Vec<u8> {
+        format!("{k:06}{}", "x".repeat(700)).into_bytes()
+    }
+
+    fn unpad_key(key: &[u8]) -> u32 {
+        std::str::from_utf8(&key[0..6]).unwrap().parse().unwrap()
+    }
+
     proptest! {
         // Each case runs up to 400 insert/delete ops with a full check_invariants()
         // tree walk after every single one -- genuinely thorough, but at the
         // default 256 cases this test alone took ~118s, and cargo test (unscoped)
         // still runs 7 more times across the rest of this project's plan. 48
         // cases keeps real random coverage (still far more than any single
-        // hand-written scenario) while cutting this to roughly 15-20s.
+        // hand-written scenario) while cutting this to a manageable runtime.
         #![proptest_config(ProptestConfig::with_cases(48))]
         #[test]
         fn insert_delete_sequence_stays_consistent(
@@ -661,22 +679,22 @@ mod tests {
 
             for (k, is_insert) in ops {
                 if is_insert {
-                    if bt.insert(&k.to_be_bytes(), b"v").is_ok() {
+                    if bt.insert(&padded_key(k), b"v").is_ok() {
                         model.insert(k);
                     }
-                } else if bt.delete(&k.to_be_bytes()).unwrap() {
+                } else if bt.delete(&padded_key(k)).unwrap() {
                     model.remove(&k);
                 }
                 bt.check_invariants().unwrap();
             }
 
             for k in &model {
-                prop_assert_eq!(bt.search(&k.to_be_bytes()).unwrap(), Some(b"v".to_vec()));
+                prop_assert_eq!(bt.search(&padded_key(*k)).unwrap(), Some(b"v".to_vec()));
             }
             let mut cursor = bt.cursor_start().unwrap();
             let mut scanned = Vec::new();
             while let Some((key, _)) = cursor.next(&mut pager).unwrap() {
-                scanned.push(u32::from_be_bytes(key.try_into().unwrap()));
+                scanned.push(unpad_key(&key));
             }
             let expected: Vec<u32> = model.iter().copied().collect();
             prop_assert_eq!(scanned, expected);
