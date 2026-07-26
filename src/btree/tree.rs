@@ -441,18 +441,26 @@ mod tests {
     fn delete_causing_leaf_underflow_borrows_or_merges_and_stays_valid() {
         let (mut pager, root) = empty_tree();
         let mut bt = BTree::new(&mut pager, root);
-        for i in 0..300u32 {
-            bt.insert(&i.to_be_bytes(), b"v").unwrap();
+        // Large keys (~700 bytes, same technique as Task 10's split test) so a
+        // leaf holds only ~5 entries before splitting: 30 keys force several
+        // leaf splits, and deleting all but the last 5 forces the earlier
+        // leaves below MIN_ENTRIES, genuinely exercising borrow/merge rather
+        // than a tree that never splits in the first place (small 4-byte keys
+        // fit 300+ entries in a single root leaf, as the reviewer verified by
+        // executing the original version of this test).
+        let key = |i: u32| format!("{i:06}{}", "x".repeat(700)).into_bytes();
+        for i in 0..30u32 {
+            bt.insert(&key(i), b"v").unwrap();
         }
-        for i in 0..250u32 {
-            assert!(bt.delete(&i.to_be_bytes()).unwrap());
+        for i in 0..25u32 {
+            assert!(bt.delete(&key(i)).unwrap());
         }
         bt.check_invariants().unwrap();
-        for i in 0..250u32 {
-            assert_eq!(bt.search(&i.to_be_bytes()).unwrap(), None);
+        for i in 0..25u32 {
+            assert_eq!(bt.search(&key(i)).unwrap(), None);
         }
-        for i in 250..300u32 {
-            assert_eq!(bt.search(&i.to_be_bytes()).unwrap(), Some(b"v".to_vec()));
+        for i in 25..30u32 {
+            assert_eq!(bt.search(&key(i)).unwrap(), Some(b"v".to_vec()));
         }
     }
 
