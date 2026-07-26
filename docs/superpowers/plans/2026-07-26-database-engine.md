@@ -1185,12 +1185,13 @@ git commit -m "Add table and index schema types"
 Write `src/types/row.rs`:
 
 ```rust
-use crate::types::schema::{Column, TableSchema};
+use crate::types::schema::TableSchema;
 use crate::types::value::{ColumnType, Value};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::schema::Column;
 
     fn schema() -> TableSchema {
         TableSchema {
@@ -1251,6 +1252,12 @@ pub fn encode_row(schema: &TableSchema, values: &[Value]) -> Vec<u8> {
             Value::Integer(i) => out.extend(&i.to_le_bytes()),
             Value::Boolean(b) => out.push(if *b { 1 } else { 0 }),
             Value::Text(s) => {
+                assert!(
+                    s.len() <= u16::MAX as usize,
+                    "text value of {} bytes exceeds the {}-byte length-prefix limit",
+                    s.len(),
+                    u16::MAX
+                );
                 out.extend(&(s.len() as u16).to_le_bytes());
                 out.extend(s.as_bytes());
             }
@@ -1294,12 +1301,29 @@ pub fn decode_row(schema: &TableSchema, data: &[u8]) -> Vec<Value> {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+The `assert!` in the `Value::Text` branch matters: without it, a string of 65536 bytes or more would have its length silently wrapped into the `u16` prefix (`s.len() as u16` truncates rather than errors), while the full string bytes still get written — producing a payload whose length prefix no longer matches its actual content and corrupting every column decoded after it. In practice a string that large can never reach this function from a real `INSERT`, since the B+Tree's `RowTooLarge` check (Task 10) rejects any row exceeding the 4096-byte page long before a single text field could approach 65536 bytes — but `encode_row` is a low-level primitive with no visibility into that later, page-size-driven limit, so it should fail loudly on its own rather than silently accepting an input it can't correctly represent.
+
+- [ ] **Step 4: Add the failing-loudly test for oversized text**
+
+Add to the `tests` module, alongside the other tests:
+
+```rust
+    #[test]
+    #[should_panic(expected = "exceeds the")]
+    fn text_exceeding_u16_length_prefix_panics_instead_of_silently_truncating() {
+        let s = schema();
+        let huge = "x".repeat(u16::MAX as usize + 1);
+        let values = vec![Value::Integer(1), Value::Text(huge), Value::Null];
+        encode_row(&s, &values);
+    }
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test types::row::tests`
-Expected: PASS (2 tests)
+Expected: PASS (3 tests)
 
-- [ ] **Step 5: Write the round-trip property test**
+- [ ] **Step 6: Write the round-trip property test**
 
 Add to the `tests` module:
 
@@ -1326,12 +1350,12 @@ Add to the `tests` module:
     }
 ```
 
-- [ ] **Step 6: Run property test to verify it passes**
+- [ ] **Step 7: Run property test to verify it passes**
 
 Run: `cargo test types::row::tests`
-Expected: PASS (3 tests)
+Expected: PASS (4 tests)
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/types/row.rs
