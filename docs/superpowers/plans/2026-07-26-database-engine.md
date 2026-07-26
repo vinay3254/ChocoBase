@@ -2364,18 +2364,28 @@ Add to the `tests` module in `src/btree/tree.rs`:
     fn delete_causing_leaf_underflow_borrows_or_merges_and_stays_valid() {
         let (mut pager, root) = empty_tree();
         let mut bt = BTree::new(&mut pager, root);
-        for i in 0..300u32 {
-            bt.insert(&i.to_be_bytes(), b"v").unwrap();
+        // Large keys (~700 bytes, same technique as Task 10's split test) so a
+        // leaf holds only ~5 entries before splitting: 300 small 4-byte keys
+        // never split the tree at all (they all fit in a single root leaf, so
+        // delete() always takes the path.is_empty() no-rebalance-needed branch
+        // -- confirmed by actually running this exact scenario), which means
+        // the original small-key version of this test exercised zero
+        // rebalancing despite its name. 30 large keys force several leaf
+        // splits, and deleting all but the last 5 forces earlier leaves below
+        // MIN_ENTRIES, genuinely exercising borrow/merge.
+        let key = |i: u32| format!("{i:06}{}", "x".repeat(700)).into_bytes();
+        for i in 0..30u32 {
+            bt.insert(&key(i), b"v").unwrap();
         }
-        for i in 0..250u32 {
-            assert!(bt.delete(&i.to_be_bytes()).unwrap());
+        for i in 0..25u32 {
+            assert!(bt.delete(&key(i)).unwrap());
         }
         bt.check_invariants().unwrap();
-        for i in 0..250u32 {
-            assert_eq!(bt.search(&i.to_be_bytes()).unwrap(), None);
+        for i in 0..25u32 {
+            assert_eq!(bt.search(&key(i)).unwrap(), None);
         }
-        for i in 250..300u32 {
-            assert_eq!(bt.search(&i.to_be_bytes()).unwrap(), Some(b"v".to_vec()));
+        for i in 25..30u32 {
+            assert_eq!(bt.search(&key(i)).unwrap(), Some(b"v".to_vec()));
         }
     }
 ```
@@ -2513,13 +2523,13 @@ Add to `impl<'a> BTree<'a>`:
     }
 ```
 
-- [ ] **Step 4: Run tests to verify basic delete passes; underflow test may hit the stub**
+- [ ] **Step 4: Run tests to verify basic delete passes; underflow test hits the stub**
 
 Run: `cargo test btree::tree::tests::delete_removes_key_from_single_leaf btree::tree::tests::delete_missing_key_returns_false`
 Expected: PASS (2 tests)
 
 Run: `cargo test btree::tree::tests::delete_causing_leaf_underflow_borrows_or_merges_and_stays_valid`
-Expected: FAIL with `unimplemented` if the delete sequence causes an internal node to underflow. This is expected — completed in Task 15.
+Expected: FAIL with `unimplemented` — the large-key insert/delete sequence forces enough leaf splits and merges that an internal node underflows and reaches `rebalance_internal`. This is expected — completed in Task 15, where this same test (unmodified) becomes the primary proof that internal rebalance works end-to-end.
 
 - [ ] **Step 5: Commit the leaf-level delete path**
 
@@ -2542,7 +2552,7 @@ git commit -m "Add BTree delete with leaf-level borrow and merge"
 - [ ] **Step 1: Confirm the still-failing test from Task 14**
 
 Run: `cargo test btree::tree::tests::delete_causing_leaf_underflow_borrows_or_merges_and_stays_valid`
-Expected: FAIL with `unimplemented` (or PASS already if that particular delete sequence never triggered an internal rebalance — if so, strengthen the test by increasing the delete count to 290 out of 300 to force it, then re-run).
+Expected: FAIL with `unimplemented`.
 
 - [ ] **Step 2: Implement `rebalance_internal` and its borrow/merge helpers**
 
