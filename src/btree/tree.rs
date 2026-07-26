@@ -135,11 +135,27 @@ impl<'a> BTree<'a> {
 
     fn split_internal(
         &mut self,
-        _path: Vec<u32>,
-        _parent_no: u32,
-        _node: InternalNode,
+        path: Vec<u32>,
+        parent_no: u32,
+        mut node: InternalNode,
     ) -> Result<(), BTreeError> {
-        unimplemented!("implemented in Task 11")
+        let old_rightmost = node.rightmost_child;
+        let n = node.entries.len();
+        let s = n / 2;
+
+        let mut right_entries = node.entries.split_off(s);
+        let promote = right_entries.remove(0);
+
+        let left_rightmost = promote.left_child;
+        let right_no = self.pager.allocate_page()?;
+
+        let right_node = InternalNode { entries: right_entries, rightmost_child: old_rightmost };
+        let left_node = InternalNode { entries: node.entries, rightmost_child: left_rightmost };
+
+        left_node.encode(self.pager.get_page_mut(parent_no)?);
+        right_node.encode(self.pager.get_page_mut(right_no)?);
+
+        self.insert_into_parent(path, parent_no, promote.key, right_no)
     }
 }
 
