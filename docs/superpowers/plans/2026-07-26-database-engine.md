@@ -1789,14 +1789,25 @@ Add to the `tests` module in `src/btree/tree.rs`:
     fn inserting_enough_keys_splits_root_and_changes_it() {
         let (mut pager, root) = empty_tree();
         let mut bt = BTree::new(&mut pager, root);
-        for i in 0..400i64 {
-            bt.insert(&(i as u64).to_be_bytes(), format!("row-{i}").as_bytes()).unwrap();
+        // Large keys (~700 bytes) mean a leaf or internal node fills after only
+        // ~5 entries, so a multi-level split cascade (through split_internal)
+        // is reached in well under 100 inserts, instead of needing tens of
+        // thousands of small sequential keys to overflow a 255-entry internal
+        // root (verified empirically: 400 small 8-byte keys never reaches
+        // split_internal at all, and 80,000 small keys does reach it but takes
+        // ~38s in a debug build — far too slow to run on every `cargo test`
+        // across the many remaining tasks that exercise this module). The
+        // zero-padded numeric prefix preserves ascending order.
+        for i in 0..100i32 {
+            let key = format!("{i:06}{}", "x".repeat(700)).into_bytes();
+            bt.insert(&key, b"v").unwrap();
         }
         assert_ne!(bt.root(), root, "enough inserts must force at least one split");
-        for i in 0..400i64 {
+        for i in 0..100i32 {
+            let key = format!("{i:06}{}", "x".repeat(700)).into_bytes();
             assert_eq!(
-                bt.search(&(i as u64).to_be_bytes()).unwrap(),
-                Some(format!("row-{i}").into_bytes())
+                bt.search(&key).unwrap(),
+                Some(b"v".to_vec())
             );
         }
     }
@@ -1912,7 +1923,7 @@ Add to `impl<'a> BTree<'a>`:
 - [ ] **Step 4: Run tests to verify they pass — expect the split test to fail**
 
 Run: `cargo test btree::tree::tests`
-Expected: `insert_then_search_finds_key`, `insert_duplicate_key_errors`, `insert_row_too_large_errors` PASS. `inserting_enough_keys_splits_root_and_changes_it` panics with `unimplemented` once enough inserts force an internal split (400 small keys with a 4096-byte page will overflow the root leaf's own capacity long before triggering a second-level split, but will trigger `split_internal` once the root leaf splits and later leaf-level splits happen again against an internal root). This is expected — the fourth test is only fully green after Task 11.
+Expected: `insert_then_search_finds_key`, `insert_duplicate_key_errors`, `insert_row_too_large_errors` PASS. `inserting_enough_keys_splits_root_and_changes_it` panics with `unimplemented` — the ~700-byte keys fill both a leaf and, once enough leaf splits have promoted enough separators, the internal root itself, reaching `split_internal` in under 100 inserts. This is expected — the fourth test is only fully green after Task 11. (5 of 6 tests in the module pass; this one fails with the `unimplemented` panic, not a different error — if it fails any other way, something is wrong with the leaf-insert/split logic itself.)
 
 - [ ] **Step 5: Commit the leaf-level insert path**
 
