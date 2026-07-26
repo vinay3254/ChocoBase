@@ -642,4 +642,37 @@ mod tests {
             }
         }
     }
+
+    proptest! {
+        #[test]
+        fn insert_delete_sequence_stays_consistent(
+            ops in pvec((0u32..200, any::<bool>()), 1..400)
+        ) {
+            let (mut pager, root) = empty_tree();
+            let mut bt = BTree::new(&mut pager, root);
+            let mut model = std::collections::BTreeSet::new();
+
+            for (k, is_insert) in ops {
+                if is_insert {
+                    if bt.insert(&k.to_be_bytes(), b"v").is_ok() {
+                        model.insert(k);
+                    }
+                } else if bt.delete(&k.to_be_bytes()).unwrap() {
+                    model.remove(&k);
+                }
+                bt.check_invariants().unwrap();
+            }
+
+            for k in &model {
+                prop_assert_eq!(bt.search(&k.to_be_bytes()).unwrap(), Some(b"v".to_vec()));
+            }
+            let mut cursor = bt.cursor_start().unwrap();
+            let mut scanned = Vec::new();
+            while let Some((key, _)) = cursor.next(&mut pager).unwrap() {
+                scanned.push(u32::from_be_bytes(key.try_into().unwrap()));
+            }
+            let expected: Vec<u32> = model.iter().copied().collect();
+            prop_assert_eq!(scanned, expected);
+        }
+    }
 }
