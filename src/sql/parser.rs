@@ -54,6 +54,7 @@ impl Parser {
         let stmt = match self.peek() {
             Token::Create => self.parse_create()?,
             Token::Drop => self.parse_drop()?,
+            Token::Insert => self.parse_insert()?,
             _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected a statement".into() }),
         };
         if matches!(self.peek(), Token::Semicolon) {
@@ -114,6 +115,76 @@ impl Parser {
             other => Err(ParseError::Syntax { offset, message: format!("expected TABLE or INDEX, found {other:?}") }),
         }
     }
+
+    fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
+        let offset = self.peek_offset();
+        match self.advance() {
+            Token::IntLiteral(n) => Ok(Expr::IntLiteral(n)),
+            Token::StringLiteral(s) => Ok(Expr::StringLiteral(s)),
+            Token::True => Ok(Expr::BoolLiteral(true)),
+            Token::False => Ok(Expr::BoolLiteral(false)),
+            Token::Null => Ok(Expr::Null),
+            Token::Identifier(name) => Ok(Expr::Column(name)),
+            Token::LParen => {
+                let e = self.parse_where_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(e)
+            }
+            other => Err(ParseError::Syntax { offset, message: format!("expected an expression, found {other:?}") }),
+        }
+    }
+
+    fn parse_insert(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Insert)?;
+        self.expect(&Token::Into)?;
+        let table = self.expect_identifier()?;
+
+        let columns = if matches!(self.peek(), Token::LParen) {
+            self.advance();
+            let mut cols = Vec::new();
+            loop {
+                cols.push(self.expect_identifier()?);
+                match self.peek() {
+                    Token::Comma => { self.advance(); }
+                    Token::RParen => break,
+                    _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')'".into() }),
+                }
+            }
+            self.expect(&Token::RParen)?;
+            Some(cols)
+        } else {
+            None
+        };
+
+        self.expect(&Token::Values)?;
+        let mut rows = Vec::new();
+        loop {
+            self.expect(&Token::LParen)?;
+            let mut row = Vec::new();
+            loop {
+                row.push(self.parse_primary_expr()?);
+                match self.peek() {
+                    Token::Comma => { self.advance(); }
+                    Token::RParen => break,
+                    _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')'".into() }),
+                }
+            }
+            self.expect(&Token::RParen)?;
+            rows.push(row);
+            match self.peek() {
+                Token::Comma => { self.advance(); }
+                _ => break,
+            }
+        }
+        Ok(Statement::Insert { table, columns, rows })
+    }
+
+    fn parse_where_expr(&mut self) -> Result<Expr, ParseError> {
+        // Full precedence-climbing implementation lands in Task 22; for now this
+        // only needs to support parenthesized literal/column expressions used by
+        // parse_primary_expr's `LParen` arm, so delegate straight to primary.
+        self.parse_primary_expr()
+    }
 }
 
 pub fn parse(sql: &str) -> Result<Statement, ParseError> {
@@ -150,5 +221,34 @@ mod tests {
     fn reports_syntax_error_with_offset() {
         let err = parse("CREATE TABLE").unwrap_err();
         assert!(matches!(err, ParseError::Syntax { .. }));
+    }
+
+    #[test]
+    fn parses_insert_with_explicit_columns() {
+        let stmt = parse("INSERT INTO users (id, name) VALUES (1, 'Ada')").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Insert {
+                table: "users".into(),
+                columns: Some(vec!["id".into(), "name".into()]),
+                rows: vec![vec![Expr::IntLiteral(1), Expr::StringLiteral("Ada".into())]],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_insert_multiple_rows_without_columns() {
+        let stmt = parse("INSERT INTO t VALUES (1, NULL), (2, TRUE)").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Insert {
+                table: "t".into(),
+                columns: None,
+                rows: vec![
+                    vec![Expr::IntLiteral(1), Expr::Null],
+                    vec![Expr::IntLiteral(2), Expr::BoolLiteral(true)],
+                ],
+            }
+        );
     }
 }
