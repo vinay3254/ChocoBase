@@ -477,7 +477,7 @@ impl Header {
 - [ ] **Step 8: Run tests to verify they pass**
 
 Run: `cargo test storage::page storage::header`
-Expected: PASS (4 tests)
+Expected: PASS (3 tests)
 
 - [ ] **Step 9: Commit**
 
