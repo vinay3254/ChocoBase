@@ -157,6 +157,53 @@ impl<'a> BTree<'a> {
 
         self.insert_into_parent(path, parent_no, promote.key, right_no)
     }
+
+    pub fn check_invariants(&mut self) -> Result<(), String> {
+        self.check_node(self.root, None, None).map(|_| ())
+    }
+
+    fn check_node(&mut self, page_no: u32, lower: Option<&[u8]>, upper: Option<&[u8]>) -> Result<usize, String> {
+        let page = self.pager.get_page(page_no).map_err(|e| e.to_string())?;
+        match page.page_type() {
+            crate::storage::page::PAGE_TYPE_LEAF => {
+                let node = LeafNode::decode(page);
+                for w in node.entries.windows(2) {
+                    if w[0].key >= w[1].key {
+                        return Err(format!("leaf {page_no}: keys out of order"));
+                    }
+                }
+                if let (Some(e), Some(lo)) = (node.entries.first(), lower) {
+                    if e.key.as_slice() < lo {
+                        return Err(format!("leaf {page_no}: key below lower bound"));
+                    }
+                }
+                if let (Some(e), Some(hi)) = (node.entries.last(), upper) {
+                    if e.key.as_slice() >= hi {
+                        return Err(format!("leaf {page_no}: key at/above upper bound"));
+                    }
+                }
+                Ok(0)
+            }
+            crate::storage::page::PAGE_TYPE_INTERNAL => {
+                let node = InternalNode::decode(page);
+                if node.entries.is_empty() {
+                    return Err(format!("internal {page_no}: no entries"));
+                }
+                let mut depths = Vec::new();
+                let mut lo = lower;
+                for e in &node.entries {
+                    depths.push(self.check_node(e.left_child, lo, Some(e.key.as_slice()))?);
+                    lo = Some(e.key.as_slice());
+                }
+                depths.push(self.check_node(node.rightmost_child, lo, upper)?);
+                if depths.iter().any(|&d| d != depths[0]) {
+                    return Err(format!("internal {page_no}: children at unequal depth {depths:?}"));
+                }
+                Ok(depths[0] + 1)
+            }
+            t => Err(format!("page {page_no}: unexpected page type {t}")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +310,39 @@ mod tests {
         for i in 0..100i32 {
             let key = format!("{i:06}{}", "x".repeat(700)).into_bytes();
             assert_eq!(bt.search(&key).unwrap(), Some(b"v".to_vec()));
+        }
+    }
+
+    #[test]
+    fn invariants_hold_after_many_inserts() {
+        let (mut pager, root) = empty_tree();
+        let mut bt = BTree::new(&mut pager, root);
+        for i in 0..500i64 {
+            let k = ((i * 37) % 500) as u64; // insertion order != key order
+            bt.insert(&k.to_be_bytes(), format!("v{k}").as_bytes()).ok();
+        }
+        bt.check_invariants().unwrap();
+    }
+
+    use proptest::prelude::*;
+    use proptest::collection::vec as pvec;
+
+    proptest! {
+        #[test]
+        fn insert_and_scan_matches_sorted_unique_keys(keys in pvec(0u32..2000, 1..300)) {
+            let (mut pager, root) = empty_tree();
+            let mut bt = BTree::new(&mut pager, root);
+            let mut inserted = std::collections::BTreeSet::new();
+            for k in &keys {
+                let key_bytes = k.to_be_bytes();
+                if bt.insert(&key_bytes, b"v").is_ok() {
+                    inserted.insert(*k);
+                }
+            }
+            bt.check_invariants().unwrap();
+            for k in &inserted {
+                prop_assert_eq!(bt.search(&k.to_be_bytes()).unwrap(), Some(b"v".to_vec()));
+            }
         }
     }
 }
