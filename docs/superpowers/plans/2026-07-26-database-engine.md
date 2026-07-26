@@ -12,7 +12,7 @@
 
 - Page size is fixed at 4096 bytes (`PAGE_SIZE` constant), never configurable at runtime.
 - A single row must fit in one page; oversized rows are a `RowTooLarge` error, never truncated or chained across overflow pages.
-- Keys are order-preserving byte strings (`Vec<u8>`) such that `memcmp` order equals SQL order; `INTEGER` uses big-endian sign-flipped 8 bytes, `TEXT` uses UTF-8 + `0x00` terminator, `BOOLEAN` is one byte.
+- Keys are order-preserving byte strings (`Vec<u8>`) such that `memcmp` order equals SQL order; `INTEGER` uses big-endian sign-flipped 8 bytes, `TEXT` uses UTF-8 + `0x00` terminator, `BOOLEAN` is one byte. Because the `TEXT` terminator is a literal `0x00` byte, a `TEXT` value containing an interior NUL character would break order-preservation for composite keys built from it (a value ending exactly at the embedded NUL becomes a byte-prefix of one that continues past it). `TEXT` values may not contain an interior NUL; this is validated at insert (Task 27's `insert_row`, which every mutating write path — `INSERT` and, via `update_row`, `UPDATE` — routes through) and rejected as `ExecError::InvalidValue`.
 - Row payload encoding (little-endian, for speed) is always distinct from key encoding (order-preserving, big-endian) — never conflate the two.
 - Every table must declare exactly one `PRIMARY KEY` column; there is no implicit rowid. The primary key column is always `NOT NULL`, regardless of how it was declared.
 - Indexed columns must be `NOT NULL`; `CREATE INDEX` on a nullable column is a rejected, clearly reported error.
@@ -4877,6 +4877,23 @@ mod tests {
     }
 
     #[test]
+    fn interior_nul_in_text_is_rejected() {
+        // TEXT keys are encoded as UTF-8 bytes + a 0x00 terminator (types/value.rs).
+        // A value containing an embedded NUL byte would let the terminator-based
+        // encoding stop early, breaking order-preservation for composite keys built
+        // from it — see the design spec's storage section: "Text values may not
+        // contain an interior NUL; this is validated at insert and rejected as
+        // InvalidValue." This is that validation.
+        let file = NamedTempFile::new().unwrap();
+        let mut pager = Pager::create(file.path()).unwrap();
+        let root = pager.allocate_page().unwrap();
+        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root).unwrap());
+        let s = schema(root);
+        let err = insert_row(&mut pager, &s, &[], &[Value::Integer(1), Value::Text("a\0b".into())]).unwrap_err();
+        assert!(matches!(err, ExecError::InvalidValue(_)));
+    }
+
+    #[test]
     fn maintains_secondary_index_entries() {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
@@ -4917,6 +4934,14 @@ pub fn insert_row(
         if col.not_null && matches!(v, Value::Null) {
             return Err(ExecError::NotNullViolation(col.name.clone()));
         }
+        if let Value::Text(s) = v {
+            if s.contains('\0') {
+                return Err(ExecError::InvalidValue(format!(
+                    "{} contains an interior NUL byte, which cannot be represented in an order-preserving key",
+                    col.name
+                )));
+            }
+        }
     }
     let pk_idx = schema.primary_key_index();
     let key = encode_key(&row[pk_idx]);
@@ -4942,10 +4967,12 @@ pub fn insert_row(
 
 Delete the now-unused `fn todo_marker() {}` helper.
 
+The interior-NUL check applies to every `TEXT` column, not only the primary key or currently-indexed columns. `CREATE INDEX` (Task 34) builds an index from a full scan of whatever rows already exist, so a NUL-containing value in a column that is unindexed *today* would silently corrupt ordering the moment an index is added on that column later. Rejecting it unconditionally at insert time — matching the design spec's stated rule exactly — closes that gap regardless of which columns end up indexed.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test exec::mutate::tests`
-Expected: PASS (4 tests)
+Expected: PASS (5 tests)
 
 - [ ] **Step 5: Wire `Insert` into the engine**
 
