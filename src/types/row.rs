@@ -1,4 +1,4 @@
-use crate::types::schema::{Column, TableSchema};
+use crate::types::schema::TableSchema;
 use crate::types::value::{ColumnType, Value};
 
 pub fn encode_row(schema: &TableSchema, values: &[Value]) -> Vec<u8> {
@@ -17,6 +17,12 @@ pub fn encode_row(schema: &TableSchema, values: &[Value]) -> Vec<u8> {
             Value::Integer(i) => out.extend(&i.to_le_bytes()),
             Value::Boolean(b) => out.push(if *b { 1 } else { 0 }),
             Value::Text(s) => {
+                assert!(
+                    s.len() <= u16::MAX as usize,
+                    "text value of {} bytes exceeds the {}-byte length-prefix limit",
+                    s.len(),
+                    u16::MAX
+                );
                 out.extend(&(s.len() as u16).to_le_bytes());
                 out.extend(s.as_bytes());
             }
@@ -62,6 +68,7 @@ pub fn decode_row(schema: &TableSchema, data: &[u8]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::schema::Column;
 
     fn schema() -> TableSchema {
         TableSchema {
@@ -82,6 +89,15 @@ mod tests {
         let encoded = encode_row(&s, &values);
         let decoded = decode_row(&s, &encoded);
         assert_eq!(decoded, values);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds the")]
+    fn text_exceeding_u16_length_prefix_panics_instead_of_silently_truncating() {
+        let s = schema();
+        let huge = "x".repeat(u16::MAX as usize + 1);
+        let values = vec![Value::Integer(1), Value::Text(huge), Value::Null];
+        encode_row(&s, &values);
     }
 
     #[test]
