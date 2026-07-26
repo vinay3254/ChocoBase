@@ -141,7 +141,9 @@ pub enum DbError {
 pub type Result<T> = std::result::Result<T, DbError>;
 ```
 
-- [ ] **Step 3: Write module declaration files**
+- [ ] **Step 3: Write module declaration files, and an empty stub for every submodule they declare**
+
+Each of these files declares `pub mod` for submodules that later tasks create. A `pub mod foo;` line does not compile until `foo.rs` exists — even as an empty file — so every submodule referenced here must exist now as a zero-byte placeholder, or `cargo build` (and therefore `cargo test`, which compiles the whole crate before running anything) will fail for every task between now and whichever task finally creates that file.
 
 `src/storage.rs`:
 ```rust
@@ -175,9 +177,10 @@ pub mod parser;
 `src/plan.rs`:
 ```rust
 pub mod expr;
-pub mod plan;
 pub mod planner;
 ```
+
+Note: this is **not** `pub mod expr; pub mod plan; pub mod planner;`. There is no `src/plan/plan.rs` anywhere in this plan — the "plan node tree" from the original design spec's module layout was folded directly into `Box<dyn Operator>` chains built by `planner::build_select_plan` (Task 28 onward), so a standalone plan-node IR file was never needed. Declaring `pub mod plan;` here would be a permanently dangling module reference.
 
 `src/exec.rs`:
 ```rust
@@ -187,19 +190,40 @@ pub mod project;
 pub mod sort;
 pub mod limit;
 pub mod mutate;
-
-use crate::error::ExecError;
-use crate::storage::pager::Pager;
-use crate::types::value::Value;
-
-pub trait Operator {
-    fn next(&mut self, pager: &mut Pager) -> Result<Option<Vec<Value>>, ExecError>;
-}
 ```
+
+Note: this is **only** the six `pub mod` lines — no `Operator` trait yet, and no `use` statements. The natural design (from the original spec) put the `Operator` trait directly in `exec.rs`, but that trait's signature needs `Pager` (from Task 3) and `Value` (from Task 5), neither of which exists yet in Task 1. Defining it here would leave `exec.rs` with unresolved imports for the several tasks between now and Task 5, breaking `cargo test` crate-wide the whole time. Task 25 (the first task that actually implements an `Operator`, via `SeqScan`) adds the trait definition to this file instead, at the point where its dependencies are finally satisfied.
 
 `src/catalog.rs`:
 ```rust
 pub mod record;
+```
+
+Now create an empty (zero-byte) file for every submodule referenced above — these are placeholders; each later task's own "Create: `src/.../foo.rs`" instruction means "replace this empty placeholder with real content," not "create a brand-new file":
+
+```
+src/storage/page.rs
+src/storage/header.rs
+src/storage/pager.rs
+src/btree/node.rs
+src/btree/cursor.rs
+src/btree/tree.rs
+src/types/value.rs
+src/types/row.rs
+src/types/schema.rs
+src/catalog/record.rs
+src/sql/token.rs
+src/sql/lexer.rs
+src/sql/ast.rs
+src/sql/parser.rs
+src/plan/expr.rs
+src/plan/planner.rs
+src/exec/scan.rs
+src/exec/filter.rs
+src/exec/project.rs
+src/exec/sort.rs
+src/exec/limit.rs
+src/exec/mutate.rs
 ```
 
 - [ ] **Step 4: Write `src/lib.rs`**
@@ -236,12 +260,23 @@ fn main() {
 }
 ```
 
-- [ ] **Step 7: Verify the project builds**
+- [ ] **Step 7: Write `.gitignore`**
+
+```
+/target
+```
+
+This crate has a binary target (`src/main.rs`), so the standard Rust convention is to commit `Cargo.lock` for reproducible builds — do not gitignore it.
+
+- [ ] **Step 8: Verify the project builds and tests run**
 
 Run: `cargo build`
-Expected: compiles with no errors (unused-code warnings are fine at this stage).
+Expected: compiles with no errors (unused-code warnings are fine at this stage — every submodule is still an empty placeholder).
 
-- [ ] **Step 8: Commit**
+Run: `cargo test`
+Expected: compiles and runs with 0 tests, 0 failures. This confirms the whole module tree resolves — the thing that actually broke the first time this task was attempted without a working Rust toolchain to check it against.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add -A
@@ -4302,14 +4337,28 @@ git commit -m "Add WHERE expression evaluation with NULL-as-false comparison sem
 ## Task 25: Executor — Operator trait, SeqScan, Filter, Project
 
 **Files:**
-- Modify: `src/exec.rs` (Operator trait already declared in Task 1)
+- Modify: `src/exec.rs` (add the `Operator` trait — deferred here from Task 1, since it needs `Pager` from Task 3 and `Value` from Task 5)
 - Create: `src/exec/scan.rs`
 - Create: `src/exec/filter.rs`
 - Create: `src/exec/project.rs`
 
 **Interfaces:**
 - Consumes: `Pager`, `btree::tree::BTree`, `btree::cursor::Cursor`, `row::decode_row`, `schema::TableSchema`, `plan::expr::{eval, is_truthy}`, `ast::Expr`.
-- Produces: `exec::Operator` (trait, already exists); `scan::SeqScan::new(TableSchema) -> SeqScan`; `filter::Filter { input: Box<dyn Operator>, schema: TableSchema, predicate: Expr }`; `project::Project { input: Box<dyn Operator>, indices: Vec<usize> }`. All three implement `Operator`.
+- Produces: `exec::Operator` (trait, defined in this task); `scan::SeqScan::new(TableSchema) -> SeqScan`; `filter::Filter { input: Box<dyn Operator>, schema: TableSchema, predicate: Expr }`; `project::Project { input: Box<dyn Operator>, indices: Vec<usize> }`. All three implement `Operator`.
+
+- [ ] **Step 0: Define the `Operator` trait**
+
+`src/exec.rs` currently holds only the six `pub mod` lines from Task 1. Add the trait below them:
+
+```rust
+use crate::error::ExecError;
+use crate::storage::pager::Pager;
+use crate::types::value::Value;
+
+pub trait Operator {
+    fn next(&mut self, pager: &mut Pager) -> Result<Option<Vec<Value>>, ExecError>;
+}
+```
 
 - [ ] **Step 1: Write the failing test for `SeqScan`**
 
