@@ -1,12 +1,21 @@
+use crate::error::PlanError;
 use crate::exec::filter::Filter;
+use crate::exec::limit::Limit;
 use crate::exec::project::Project;
 use crate::exec::scan::{SeqScan, TableSeek};
+use crate::exec::sort::Sort;
 use crate::exec::Operator;
 use crate::sql::ast::{BinOp, Expr};
 use crate::types::schema::TableSchema;
 use crate::types::value::{encode_key, Value};
 
-pub fn build_select_plan(schema: &TableSchema, where_clause: Option<Expr>, projection_indices: Vec<usize>) -> Box<dyn Operator> {
+pub fn build_select_plan(
+    schema: &TableSchema,
+    where_clause: Option<Expr>,
+    projection_indices: Vec<usize>,
+    order_by: Option<(String, bool)>,
+    limit: Option<i64>,
+) -> Result<Box<dyn Operator>, PlanError> {
     let pk_col = schema.columns[schema.primary_key_index()].name.clone();
     let (pk_value, residual) = extract_pk_equality(where_clause, &pk_col);
 
@@ -17,7 +26,15 @@ pub fn build_select_plan(schema: &TableSchema, where_clause: Option<Expr>, proje
     if let Some(predicate) = residual {
         plan = Box::new(Filter { input: plan, schema: schema.clone(), predicate });
     }
-    Box::new(Project { input: plan, indices: projection_indices })
+    if let Some((col, desc)) = order_by {
+        let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
+        plan = Box::new(Sort::new(plan, idx, desc));
+    }
+    plan = Box::new(Project { input: plan, indices: projection_indices });
+    if let Some(n) = limit {
+        plan = Box::new(Limit::new(plan, n));
+    }
+    Ok(plan)
 }
 
 fn split_and_conjuncts(expr: Expr, out: &mut Vec<Expr>) {
@@ -133,7 +150,7 @@ mod tests {
             left: Box::new(Expr::Column("id".into())),
             right: Box::new(Expr::IntLiteral(1)),
         };
-        let mut plan = build_select_plan(&schema, Some(predicate), vec![1]); // project just "name"
+        let mut plan = build_select_plan(&schema, Some(predicate), vec![1], None, None).unwrap(); // project just "name"
 
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut pager).unwrap() {
@@ -179,7 +196,7 @@ mod tests {
             right: Box::new(Expr::IntLiteral(2500)),
         };
         pager.reset_read_counter();
-        let mut plan = build_select_plan(&schema, Some(predicate), vec![0]);
+        let mut plan = build_select_plan(&schema, Some(predicate), vec![0], None, None).unwrap();
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut pager).unwrap() {
             rows.push(row);

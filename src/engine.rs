@@ -40,7 +40,9 @@ impl Database {
             Statement::CreateTable { name, columns } => self.execute_create_table(name, columns)?,
             Statement::DropTable { name } => self.execute_drop_table(&name)?,
             Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows)?,
-            Statement::Select { columns, table, where_clause, order_by: _order_by, limit: _limit } => self.execute_select(columns, &table, where_clause)?,
+            Statement::Select { columns, table, where_clause, order_by, limit } => {
+                self.execute_select(columns, &table, where_clause, order_by, limit)?
+            }
             other => {
                 return Err(DbError::Plan(PlanError::InvalidSchema(format!(
                     "statement not yet supported: {other:?}"
@@ -151,7 +153,14 @@ impl Database {
         Ok(ExecResult::Modified(count))
     }
 
-    fn execute_select(&mut self, columns: SelectColumns, table: &str, where_clause: Option<Expr>) -> Result<ExecResult> {
+    fn execute_select(
+        &mut self,
+        columns: SelectColumns,
+        table: &str,
+        where_clause: Option<Expr>,
+        order_by: Option<(String, bool)>,
+        limit: Option<i64>,
+    ) -> Result<ExecResult> {
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
@@ -171,7 +180,7 @@ impl Database {
             }
         };
 
-        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, indices);
+        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, indices, order_by, limit)?;
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             rows.push(row);
@@ -272,6 +281,22 @@ mod tests {
             ExecResult::Rows { columns, rows } => {
                 assert_eq!(columns, vec!["name".to_string()]);
                 assert_eq!(rows, vec![vec![Value::Text("b".into())], vec![Value::Text("c".into())]]);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_with_order_by_and_limit() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, score INTEGER)").unwrap();
+        db.execute("INSERT INTO t (id, score) VALUES (1, 30), (2, 10), (3, 20)").unwrap();
+
+        let result = db.execute("SELECT id FROM t ORDER BY score LIMIT 2").unwrap();
+        match result {
+            ExecResult::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]);
             }
             other => panic!("unexpected result: {other:?}"),
         }
