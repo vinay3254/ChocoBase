@@ -164,6 +164,14 @@ mod tests {
         };
         schema.root_page = final_root;
         pager.flush().unwrap();
+        // Force a genuinely cold cache before measuring: the pager's LRU cache
+        // holds 256 pages, and the tree built above easily fits, so every page
+        // touched during setup is still resident. Without reopening, pages_read
+        // would report 0 for ANY query afterward (TableSeek or a full SeqScan
+        // alike), making the assertion below vacuously true regardless of which
+        // operator actually ran -- proving nothing about page efficiency.
+        drop(pager);
+        let mut pager = Pager::open(file.path()).unwrap();
 
         let predicate = Expr::BinaryOp {
             op: crate::sql::ast::BinOp::Eq,
@@ -177,10 +185,38 @@ mod tests {
             rows.push(row);
         }
         assert_eq!(rows, vec![vec![Value::Integer(2500)]]);
+        let table_seek_pages = pager.stats().pages_read;
         assert!(
-            pager.stats().pages_read < 20,
-            "a PK-equality lookup on a 5000-row tree should touch only a handful of pages, touched {}",
-            pager.stats().pages_read
+            table_seek_pages < 20,
+            "a PK-equality lookup on a 5000-row tree should touch only a handful of pages, touched {table_seek_pages}"
         );
+
+        // Directly prove the optimization's value, not just an absolute threshold:
+        // reopen again (cold cache) and run the SAME predicate through a hand-built
+        // SeqScan + Filter plan (Task 28's pre-TableSeek behavior), which must walk
+        // the entire leaf chain and therefore read strictly more pages.
+        drop(pager);
+        let mut pager = Pager::open(file.path()).unwrap();
+        pager.reset_read_counter();
+        let seq_scan: Box<dyn crate::exec::Operator> = Box::new(SeqScan::new(schema.clone()));
+        let mut seq_plan = Filter { input: seq_scan, schema: schema.clone(), predicate: predicate_for_seq_scan() };
+        let mut seq_rows = Vec::new();
+        while let Some(row) = seq_plan.next(&mut pager).unwrap() {
+            seq_rows.push(row);
+        }
+        assert_eq!(seq_rows, vec![vec![Value::Integer(2500)]]);
+        let seq_scan_pages = pager.stats().pages_read;
+        assert!(
+            table_seek_pages < seq_scan_pages,
+            "TableSeek ({table_seek_pages} pages) should read strictly fewer pages than a full SeqScan ({seq_scan_pages} pages) for the same predicate"
+        );
+    }
+
+    fn predicate_for_seq_scan() -> Expr {
+        Expr::BinaryOp {
+            op: crate::sql::ast::BinOp::Eq,
+            left: Box::new(Expr::Column("id".into())),
+            right: Box::new(Expr::IntLiteral(2500)),
+        }
     }
 }
