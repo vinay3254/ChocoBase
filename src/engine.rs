@@ -44,6 +44,7 @@ impl Database {
                 self.execute_select(columns, &table, where_clause, order_by, limit)?
             }
             Statement::Delete { table, where_clause } => self.execute_delete(&table, where_clause)?,
+            Statement::Update { table, assignments, where_clause } => self.execute_update(&table, assignments, where_clause)?,
             other => {
                 return Err(DbError::Plan(PlanError::InvalidSchema(format!(
                     "statement not yet supported: {other:?}"
@@ -241,6 +242,81 @@ impl Database {
 
         Ok(ExecResult::Modified(count))
     }
+
+    fn execute_update(
+        &mut self,
+        table: &str,
+        assignments: Vec<(String, Expr)>,
+        where_clause: Option<Expr>,
+    ) -> Result<ExecResult> {
+        let schema = self
+            .catalog
+            .get_table(&mut self.pager, table)?
+            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+
+        let mut assignment_indices = Vec::new();
+        for (name, expr) in assignments {
+            let idx = schema.column_index(&name).ok_or_else(|| PlanError::NoSuchColumn(name.clone()))?;
+            assignment_indices.push((idx, expr));
+        }
+
+        let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
+        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, all_columns, None, None)?;
+        let mut old_rows = Vec::new();
+        while let Some(row) = plan.next(&mut self.pager)? {
+            old_rows.push(row);
+        }
+
+        let mut table_root = schema.root_page;
+        let mut index_roots: HashMap<String, u32> =
+            indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
+        let mut count = 0usize;
+
+        for old_row in &old_rows {
+            let mut new_row = old_row.clone();
+            for (idx, expr) in &assignment_indices {
+                new_row[*idx] =
+                    crate::plan::expr::eval(expr, &schema, old_row).map_err(DbError::Plan)?;
+            }
+
+            let mut schema_for_write = schema.clone();
+            schema_for_write.root_page = table_root;
+            let indexes_for_write: Vec<IndexSchema> = indexes
+                .iter()
+                .cloned()
+                .map(|mut idx| {
+                    idx.root_page = index_roots[&idx.name];
+                    idx
+                })
+                .collect();
+
+            let (new_table_root, new_index_roots) = crate::exec::mutate::update_row(
+                &mut self.pager,
+                &schema_for_write,
+                &indexes_for_write,
+                old_row,
+                &new_row,
+            )?;
+            table_root = new_table_root;
+            for (name, root) in new_index_roots {
+                index_roots.insert(name, root);
+            }
+            count += 1;
+        }
+
+        if table_root != schema.root_page {
+            self.catalog.update_table_root(&mut self.pager, table, table_root)?;
+        }
+        for idx in &indexes {
+            let new_root = index_roots[&idx.name];
+            if new_root != idx.root_page {
+                self.catalog.update_index_root(&mut self.pager, &idx.name, new_root)?;
+            }
+        }
+
+        Ok(ExecResult::Modified(count))
+    }
 }
 
 fn literal_to_value(expr: &Expr) -> Result<Value> {
@@ -372,6 +448,29 @@ mod tests {
                 remaining.sort();
                 assert_eq!(remaining, vec![1, 3]);
             }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_changes_matching_rows_only() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b')").unwrap();
+
+        assert_eq!(db.execute("UPDATE t SET name = 'z' WHERE id = 1").unwrap(), ExecResult::Modified(1));
+
+        let result = db.execute("SELECT id, name FROM t WHERE id = 1").unwrap();
+        match result {
+            ExecResult::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Integer(1), Value::Text("z".into())]]);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        let unchanged = db.execute("SELECT name FROM t WHERE id = 2").unwrap();
+        match unchanged {
+            ExecResult::Rows { rows, .. } => assert_eq!(rows, vec![vec![Value::Text("b".into())]]),
             other => panic!("unexpected result: {other:?}"),
         }
     }
