@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use crate::btree::node::LeafNode;
 use crate::catalog::Catalog;
 use crate::error::{DbError, PlanError, Result};
-use crate::sql::ast::{ColumnDef, Statement, Expr};
+use crate::sql::ast::{ColumnDef, Statement, Expr, SelectColumns};
 use crate::storage::pager::Pager;
 use crate::types::schema::{Column, TableSchema, IndexSchema};
 use crate::types::value::Value;
@@ -40,6 +40,7 @@ impl Database {
             Statement::CreateTable { name, columns } => self.execute_create_table(name, columns)?,
             Statement::DropTable { name } => self.execute_drop_table(&name)?,
             Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows)?,
+            Statement::Select { columns, table, where_clause, order_by: _order_by, limit: _limit } => self.execute_select(columns, &table, where_clause)?,
             other => {
                 return Err(DbError::Plan(PlanError::InvalidSchema(format!(
                     "statement not yet supported: {other:?}"
@@ -149,6 +150,34 @@ impl Database {
 
         Ok(ExecResult::Modified(count))
     }
+
+    fn execute_select(&mut self, columns: SelectColumns, table: &str, where_clause: Option<Expr>) -> Result<ExecResult> {
+        let schema = self
+            .catalog
+            .get_table(&mut self.pager, table)?
+            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+
+        let (out_names, indices): (Vec<String>, Vec<usize>) = match &columns {
+            SelectColumns::All => (
+                schema.columns.iter().map(|c| c.name.clone()).collect(),
+                (0..schema.columns.len()).collect(),
+            ),
+            SelectColumns::List(names) => {
+                let mut idxs = Vec::new();
+                for n in names {
+                    idxs.push(schema.column_index(n).ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?);
+                }
+                (names.clone(), idxs)
+            }
+        };
+
+        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, indices);
+        let mut rows = Vec::new();
+        while let Some(row) = plan.next(&mut self.pager)? {
+            rows.push(row);
+        }
+        Ok(ExecResult::Rows { columns: out_names, rows })
+    }
 }
 
 fn literal_to_value(expr: &Expr) -> Result<Value> {
@@ -228,6 +257,23 @@ mod tests {
         for i in 0..500 {
             let sql = format!("INSERT INTO t (id) VALUES ({i})");
             assert_eq!(db.execute(&sql).unwrap(), ExecResult::Modified(1));
+        }
+    }
+
+    #[test]
+    fn select_with_where_and_projection() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')").unwrap();
+
+        let result = db.execute("SELECT name FROM t WHERE id > 1").unwrap();
+        match result {
+            ExecResult::Rows { columns, rows } => {
+                assert_eq!(columns, vec!["name".to_string()]);
+                assert_eq!(rows, vec![vec![Value::Text("b".into())], vec![Value::Text("c".into())]]);
+            }
+            other => panic!("unexpected result: {other:?}"),
         }
     }
 }
