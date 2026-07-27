@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use crate::btree::node::LeafNode;
 use crate::catalog::Catalog;
 use crate::error::{DbError, PlanError, Result};
+use crate::exec::Operator;
 use crate::sql::ast::{ColumnDef, Statement, Expr, SelectColumns};
 use crate::storage::pager::Pager;
 use crate::types::schema::{Column, TableSchema, IndexSchema};
@@ -39,17 +40,14 @@ impl Database {
         let result = match stmt {
             Statement::CreateTable { name, columns } => self.execute_create_table(name, columns)?,
             Statement::DropTable { name } => self.execute_drop_table(&name)?,
+            Statement::CreateIndex { name, table, column } => self.execute_create_index(&name, &table, &column)?,
+            Statement::DropIndex { name } => self.execute_drop_index(&name)?,
             Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows)?,
             Statement::Select { columns, table, where_clause, order_by, limit } => {
                 self.execute_select(columns, &table, where_clause, order_by, limit)?
             }
             Statement::Delete { table, where_clause } => self.execute_delete(&table, where_clause)?,
             Statement::Update { table, assignments, where_clause } => self.execute_update(&table, assignments, where_clause)?,
-            other => {
-                return Err(DbError::Plan(PlanError::InvalidSchema(format!(
-                    "statement not yet supported: {other:?}"
-                ))))
-            }
         };
         self.pager.flush()?;
         Ok(result)
@@ -80,6 +78,48 @@ impl Database {
 
     fn execute_drop_table(&mut self, name: &str) -> Result<ExecResult> {
         self.catalog.drop_table(&mut self.pager, name)?;
+        Ok(ExecResult::Ok)
+    }
+
+    fn execute_create_index(&mut self, name: &str, table: &str, column: &str) -> Result<ExecResult> {
+        let schema = self
+            .catalog
+            .get_table(&mut self.pager, table)?
+            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+        let col_idx = schema
+            .column_index(column)
+            .ok_or_else(|| PlanError::NoSuchColumn(column.to_string()))?;
+        if !schema.columns[col_idx].not_null {
+            return Err(DbError::Plan(PlanError::InvalidSchema(format!(
+                "indexed column {column} must be NOT NULL"
+            ))));
+        }
+
+        let initial_index_root = self.pager.allocate_page()?;
+        LeafNode { entries: vec![], next_leaf: 0 }.encode(self.pager.get_page_mut(initial_index_root)?);
+
+        let pk_idx = schema.primary_key_index();
+        let mut scan = crate::exec::scan::SeqScan::new(schema.clone());
+        let mut current_root = initial_index_root;
+        while let Some(row) = scan.next(&mut self.pager)? {
+            let idx_key = crate::types::value::encode_composite_key(&[row[col_idx].clone(), row[pk_idx].clone()]);
+            let mut ibt = crate::btree::tree::BTree::new(&mut self.pager, current_root);
+            ibt.insert(&idx_key, &[])?;
+            current_root = ibt.root();
+        }
+
+        let idx_schema = crate::types::schema::IndexSchema {
+            name: name.to_string(),
+            table: table.to_string(),
+            column: column.to_string(),
+            root_page: current_root,
+        };
+        self.catalog.create_index(&mut self.pager, &idx_schema)?;
+        Ok(ExecResult::Ok)
+    }
+
+    fn execute_drop_index(&mut self, name: &str) -> Result<ExecResult> {
+        self.catalog.drop_index(&mut self.pager, name)?;
         Ok(ExecResult::Ok)
     }
 
@@ -473,5 +513,25 @@ mod tests {
             ExecResult::Rows { rows, .. } => assert_eq!(rows, vec![vec![Value::Text("b".into())]]),
             other => panic!("unexpected result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn create_index_on_existing_rows_then_drop_it() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b')").unwrap();
+
+        assert_eq!(db.execute("CREATE INDEX idx_name ON t (name)").unwrap(), ExecResult::Ok);
+        assert_eq!(db.execute("DROP INDEX idx_name").unwrap(), ExecResult::Ok);
+    }
+
+    #[test]
+    fn create_index_on_nullable_column_errors() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+        let err = db.execute("CREATE INDEX idx_name ON t (name)").unwrap_err();
+        assert!(matches!(err, DbError::Plan(PlanError::InvalidSchema(_))));
     }
 }
