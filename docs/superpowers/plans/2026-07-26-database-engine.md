@@ -4303,7 +4303,7 @@ Add to `impl Parser`:
 - [ ] **Step 4: Run the full parser test suite**
 
 Run: `cargo test sql::`
-Expected: PASS (all tests from Tasks 19–23; 11 parser tests plus 5 lexer tests)
+Expected: PASS (all tests from Tasks 19–23; 11 parser tests plus 7 lexer tests, 18 total — the lexer count grew from 5 to 7 in Task 19 when its reviewer required non-ASCII UTF-8 coverage)
 
 - [ ] **Step 5: Commit**
 
