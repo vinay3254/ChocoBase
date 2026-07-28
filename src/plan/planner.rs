@@ -2,15 +2,16 @@ use crate::error::PlanError;
 use crate::exec::filter::Filter;
 use crate::exec::limit::Limit;
 use crate::exec::project::Project;
-use crate::exec::scan::{SeqScan, TableSeek};
+use crate::exec::scan::{IndexSeek, SeqScan, TableSeek};
 use crate::exec::sort::Sort;
 use crate::exec::Operator;
 use crate::sql::ast::{BinOp, Expr};
-use crate::types::schema::TableSchema;
+use crate::types::schema::{IndexSchema, TableSchema};
 use crate::types::value::{encode_key, Value};
 
 pub fn build_select_plan(
     schema: &TableSchema,
+    indexes: &[IndexSchema],
     where_clause: Option<Expr>,
     projection_indices: Vec<usize>,
     order_by: Option<(String, bool)>,
@@ -19,10 +20,15 @@ pub fn build_select_plan(
     let pk_col = schema.columns[schema.primary_key_index()].name.clone();
     let (pk_value, residual) = extract_pk_equality(where_clause, &pk_col);
 
-    let mut plan: Box<dyn Operator> = match pk_value {
-        Some(v) => Box::new(TableSeek::new(schema.clone(), encode_key(&v))),
-        None => Box::new(SeqScan::new(schema.clone())),
+    let (mut plan, residual): (Box<dyn Operator>, Option<Expr>) = if let Some(v) = pk_value {
+        (Box::new(TableSeek::new(schema.clone(), encode_key(&v))), residual)
+    } else if let Some((idx_schema, value, residual2)) = find_index_equality(residual.clone(), indexes) {
+        let prefix = encode_key(&value);
+        (Box::new(IndexSeek::new(schema.clone(), idx_schema.root_page, prefix)), residual2)
+    } else {
+        (Box::new(SeqScan::new(schema.clone())), residual)
     };
+
     if let Some(predicate) = residual {
         plan = Box::new(Filter { input: plan, schema: schema.clone(), predicate });
     }
@@ -35,6 +41,41 @@ pub fn build_select_plan(
         plan = Box::new(Limit::new(plan, n));
     }
     Ok(plan)
+}
+
+fn find_index_equality(where_clause: Option<Expr>, indexes: &[IndexSchema]) -> Option<(IndexSchema, Value, Option<Expr>)> {
+    let expr = where_clause?;
+    if contains_or(&expr) {
+        return None;
+    }
+    let mut conjuncts = Vec::new();
+    split_and_conjuncts(expr, &mut conjuncts);
+
+    let mut matched: Option<(IndexSchema, Value)> = None;
+    let mut remaining = Vec::new();
+    for c in conjuncts {
+        if matched.is_none() {
+            if let Expr::BinaryOp { op: BinOp::Eq, left, right } = &c {
+                let candidate = match (left.as_ref(), right.as_ref()) {
+                    (Expr::Column(name), lit) => indexes
+                        .iter()
+                        .find(|i| &i.column == name)
+                        .and_then(|i| literal_value(lit).map(|v| (i.clone(), v))),
+                    (lit, Expr::Column(name)) => indexes
+                        .iter()
+                        .find(|i| &i.column == name)
+                        .and_then(|i| literal_value(lit).map(|v| (i.clone(), v))),
+                    _ => None,
+                };
+                if let Some(pair) = candidate {
+                    matched = Some(pair);
+                    continue;
+                }
+            }
+        }
+        remaining.push(c);
+    }
+    matched.map(|(idx, v)| (idx, v, rebuild_and(remaining)))
 }
 
 fn split_and_conjuncts(expr: Expr, out: &mut Vec<Expr>) {
@@ -150,7 +191,7 @@ mod tests {
             left: Box::new(Expr::Column("id".into())),
             right: Box::new(Expr::IntLiteral(1)),
         };
-        let mut plan = build_select_plan(&schema, Some(predicate), vec![1], None, None).unwrap(); // project just "name"
+        let mut plan = build_select_plan(&schema, &[], Some(predicate), vec![1], None, None).unwrap(); // project just "name"
 
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut pager).unwrap() {
@@ -196,7 +237,7 @@ mod tests {
             right: Box::new(Expr::IntLiteral(2500)),
         };
         pager.reset_read_counter();
-        let mut plan = build_select_plan(&schema, Some(predicate), vec![0], None, None).unwrap();
+        let mut plan = build_select_plan(&schema, &[], Some(predicate), vec![0], None, None).unwrap();
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut pager).unwrap() {
             rows.push(row);
