@@ -62,6 +62,44 @@ impl Operator for TableSeek {
     }
 }
 
+pub struct IndexSeek {
+    index_root: u32,
+    schema: TableSchema,
+    prefix: Vec<u8>,
+    cursor: Cursor,
+    started: bool,
+}
+
+impl IndexSeek {
+    pub fn new(schema: TableSchema, index_root: u32, prefix: Vec<u8>) -> Self {
+        IndexSeek { index_root, schema, prefix, cursor: Cursor::empty(), started: false }
+    }
+}
+
+impl Operator for IndexSeek {
+    fn next(&mut self, pager: &mut Pager) -> Result<Option<Vec<Value>>, ExecError> {
+        if !self.started {
+            self.cursor = { BTree::new(pager, self.index_root).cursor_seek(&self.prefix)? };
+            self.started = true;
+        }
+        loop {
+            match self.cursor.next(pager)? {
+                Some((key, _)) => {
+                    if !key.starts_with(self.prefix.as_slice()) {
+                        return Ok(None);
+                    }
+                    let pk_bytes = key[self.prefix.len()..].to_vec();
+                    let mut table_bt = BTree::new(pager, self.schema.root_page);
+                    if let Some(payload) = table_bt.search(&pk_bytes)? {
+                        return Ok(Some(decode_row(&self.schema, &payload)));
+                    }
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +168,56 @@ mod tests {
         let missing_key = crate::types::value::encode_key(&Value::Integer(99));
         let mut seek_missing = TableSeek::new(schema_with_root(final_root), missing_key);
         assert_eq!(seek_missing.next(&mut pager).unwrap(), None);
+    }
+
+    #[test]
+    fn index_seek_finds_row_by_indexed_value() {
+        let file = NamedTempFile::new().unwrap();
+        let mut pager = Pager::create(file.path()).unwrap();
+        let table_root = pager.allocate_page().unwrap();
+        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(table_root).unwrap());
+        let index_root = pager.allocate_page().unwrap();
+        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(index_root).unwrap());
+
+        let schema = TableSchema {
+            name: "t".into(),
+            columns: vec![
+                Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true },
+                Column { name: "name".into(), ty: ColumnType::Text, not_null: true, is_primary_key: false },
+            ],
+            root_page: table_root,
+        };
+
+        let rows = [(1, "a"), (2, "b"), (3, "a")];
+
+        let final_table_root = {
+            let mut tbt = BTree::new(&mut pager, table_root);
+            for (id, name) in rows {
+                let row = vec![Value::Integer(id), Value::Text(name.into())];
+                tbt.insert(&crate::types::value::encode_key(&Value::Integer(id)), &crate::types::row::encode_row(&schema, &row)).unwrap();
+            }
+            tbt.root()
+        };
+
+        let final_index_root = {
+            let mut ibt = BTree::new(&mut pager, index_root);
+            for (id, name) in rows {
+                let idx_key = crate::types::value::encode_composite_key(&[Value::Text(name.into()), Value::Integer(id)]);
+                ibt.insert(&idx_key, &[]).unwrap();
+            }
+            ibt.root()
+        };
+
+        let mut final_schema = schema.clone();
+        final_schema.root_page = final_table_root;
+        let prefix = crate::types::value::encode_key(&Value::Text("a".into()));
+        let mut seek = IndexSeek::new(final_schema, final_index_root, prefix);
+
+        let mut seen = Vec::new();
+        while let Some(row) = seek.next(&mut pager).unwrap() {
+            seen.push(row[0].clone());
+        }
+        seen.sort_by_key(|v| match v { Value::Integer(n) => *n, _ => unreachable!() });
+        assert_eq!(seen, vec![Value::Integer(1), Value::Integer(3)]);
     }
 }
