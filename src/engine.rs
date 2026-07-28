@@ -207,6 +207,7 @@ impl Database {
             .catalog
             .get_table(&mut self.pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
 
         let (out_names, indices): (Vec<String>, Vec<usize>) = match &columns {
             SelectColumns::All => (
@@ -222,7 +223,7 @@ impl Database {
             }
         };
 
-        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, indices, order_by, limit)?;
+        let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, indices, order_by, limit)?;
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             rows.push(row);
@@ -238,7 +239,7 @@ impl Database {
         let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
 
         let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, all_columns, None, None)?;
+        let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, all_columns, None, None)?;
         let mut rows_to_delete = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             rows_to_delete.push(row);
@@ -302,7 +303,7 @@ impl Database {
         }
 
         let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, all_columns, None, None)?;
+        let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, all_columns, None, None)?;
         let mut old_rows = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             old_rows.push(row);
@@ -533,5 +534,24 @@ mod tests {
         db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
         let err = db.execute("CREATE INDEX idx_name ON t (name)").unwrap_err();
         assert!(matches!(err, DbError::Plan(PlanError::InvalidSchema(_))));
+    }
+
+    #[test]
+    fn select_on_indexed_column_uses_index_and_returns_correct_rows() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'a')").unwrap();
+        db.execute("CREATE INDEX idx_name ON t (name)").unwrap();
+
+        let result = db.execute("SELECT id FROM t WHERE name = 'a'").unwrap();
+        match result {
+            ExecResult::Rows { rows, .. } => {
+                let mut ids: Vec<i64> = rows.iter().map(|r| match &r[0] { Value::Integer(n) => *n, _ => unreachable!() }).collect();
+                ids.sort();
+                assert_eq!(ids, vec![1, 3]);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
     }
 }
