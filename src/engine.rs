@@ -1,11 +1,12 @@
 use std::path::Path;
+use std::collections::HashMap;
 
 use crate::btree::node::LeafNode;
 use crate::catalog::Catalog;
 use crate::error::{DbError, PlanError, Result};
-use crate::sql::ast::{ColumnDef, Statement};
+use crate::sql::ast::{ColumnDef, Statement, Expr, SelectColumns};
 use crate::storage::pager::Pager;
-use crate::types::schema::{Column, TableSchema};
+use crate::types::schema::{Column, TableSchema, IndexSchema};
 use crate::types::value::Value;
 
 pub struct Database {
@@ -38,6 +39,8 @@ impl Database {
         let result = match stmt {
             Statement::CreateTable { name, columns } => self.execute_create_table(name, columns)?,
             Statement::DropTable { name } => self.execute_drop_table(&name)?,
+            Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows)?,
+            Statement::Select { columns, table, where_clause, order_by: _order_by, limit: _limit } => self.execute_select(columns, &table, where_clause)?,
             other => {
                 return Err(DbError::Plan(PlanError::InvalidSchema(format!(
                     "statement not yet supported: {other:?}"
@@ -74,6 +77,118 @@ impl Database {
     fn execute_drop_table(&mut self, name: &str) -> Result<ExecResult> {
         self.catalog.drop_table(&mut self.pager, name)?;
         Ok(ExecResult::Ok)
+    }
+
+    fn execute_insert(
+        &mut self,
+        table: &str,
+        columns: Option<Vec<String>>,
+        rows: Vec<Vec<Expr>>,
+    ) -> Result<ExecResult> {
+        let schema = self
+            .catalog
+            .get_table(&mut self.pager, table)?
+            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+
+        let target_indices: Vec<usize> = match &columns {
+            Some(names) => {
+                let mut idxs = Vec::new();
+                for n in names {
+                    idxs.push(schema.column_index(n).ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?);
+                }
+                idxs
+            }
+            None => (0..schema.columns.len()).collect(),
+        };
+
+        let mut count = 0usize;
+        let mut table_root = schema.root_page;
+        let mut index_roots: HashMap<String, u32> =
+            indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
+
+        for row_exprs in rows {
+            if row_exprs.len() != target_indices.len() {
+                return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+                    "value count does not match column count".into(),
+                )));
+            }
+            let mut full_row = vec![Value::Null; schema.columns.len()];
+            for (expr, &col_idx) in row_exprs.iter().zip(target_indices.iter()) {
+                full_row[col_idx] = literal_to_value(expr)?;
+            }
+
+            let mut schema_for_write = schema.clone();
+            schema_for_write.root_page = table_root;
+            let indexes_for_write: Vec<IndexSchema> = indexes
+                .iter()
+                .cloned()
+                .map(|mut idx| {
+                    idx.root_page = index_roots[&idx.name];
+                    idx
+                })
+                .collect();
+
+            let (new_table_root, new_index_roots) =
+                crate::exec::mutate::insert_row(&mut self.pager, &schema_for_write, &indexes_for_write, &full_row)?;
+            table_root = new_table_root;
+            for (name, root) in new_index_roots {
+                index_roots.insert(name, root);
+            }
+            count += 1;
+        }
+
+        if table_root != schema.root_page {
+            self.catalog.update_table_root(&mut self.pager, table, table_root)?;
+        }
+        for idx in &indexes {
+            let new_root = index_roots[&idx.name];
+            if new_root != idx.root_page {
+                self.catalog.update_index_root(&mut self.pager, &idx.name, new_root)?;
+            }
+        }
+
+        Ok(ExecResult::Modified(count))
+    }
+
+    fn execute_select(&mut self, columns: SelectColumns, table: &str, where_clause: Option<Expr>) -> Result<ExecResult> {
+        let schema = self
+            .catalog
+            .get_table(&mut self.pager, table)?
+            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+
+        let (out_names, indices): (Vec<String>, Vec<usize>) = match &columns {
+            SelectColumns::All => (
+                schema.columns.iter().map(|c| c.name.clone()).collect(),
+                (0..schema.columns.len()).collect(),
+            ),
+            SelectColumns::List(names) => {
+                let mut idxs = Vec::new();
+                for n in names {
+                    idxs.push(schema.column_index(n).ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?);
+                }
+                (names.clone(), idxs)
+            }
+        };
+
+        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, indices);
+        let mut rows = Vec::new();
+        while let Some(row) = plan.next(&mut self.pager)? {
+            rows.push(row);
+        }
+        Ok(ExecResult::Rows { columns: out_names, rows })
+    }
+}
+
+fn literal_to_value(expr: &Expr) -> Result<Value> {
+    match expr {
+        Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
+        Expr::StringLiteral(s) => Ok(Value::Text(s.clone())),
+        Expr::BoolLiteral(b) => Ok(Value::Boolean(*b)),
+        Expr::Null => Ok(Value::Null),
+        other => Err(DbError::Exec(crate::error::ExecError::InvalidValue(format!(
+            "expected a literal value in INSERT, found {other:?}"
+        )))),
     }
 }
 
@@ -120,5 +235,45 @@ mod tests {
         }
         let mut db = Database::open(path).unwrap();
         db.execute("DROP TABLE t").unwrap(); // succeeds only if the schema survived reopen
+    }
+
+    #[test]
+    fn insert_then_reinsert_same_pk_errors() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+        assert_eq!(
+            db.execute("INSERT INTO t (id, name) VALUES (1, 'a')").unwrap(),
+            ExecResult::Modified(1)
+        );
+        assert!(db.execute("INSERT INTO t (id, name) VALUES (1, 'b')").is_err());
+    }
+
+    #[test]
+    fn insert_many_rows_forces_table_split_and_still_works() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        for i in 0..500 {
+            let sql = format!("INSERT INTO t (id) VALUES ({i})");
+            assert_eq!(db.execute(&sql).unwrap(), ExecResult::Modified(1));
+        }
+    }
+
+    #[test]
+    fn select_with_where_and_projection() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')").unwrap();
+
+        let result = db.execute("SELECT name FROM t WHERE id > 1").unwrap();
+        match result {
+            ExecResult::Rows { columns, rows } => {
+                assert_eq!(columns, vec!["name".to_string()]);
+                assert_eq!(rows, vec![vec![Value::Text("b".into())], vec![Value::Text("c".into())]]);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
     }
 }
