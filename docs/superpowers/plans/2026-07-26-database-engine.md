@@ -5609,7 +5609,7 @@ Add to the `tests` module in `src/plan/planner.rs`:
         };
         let final_root = {
             let mut bt = crate::btree::tree::BTree::new(&mut pager, initial_root);
-            for i in 0..500i64 {
+            for i in 0..5000i64 {
                 let row = vec![Value::Integer(i)];
                 bt.insert(&crate::types::value::encode_key(&Value::Integer(i)), &crate::types::row::encode_row(&schema, &row)).unwrap();
             }
@@ -5617,11 +5617,19 @@ Add to the `tests` module in `src/plan/planner.rs`:
         };
         schema.root_page = final_root;
         pager.flush().unwrap();
+        // Force a genuinely cold cache before measuring: the pager's LRU cache
+        // holds 256 pages, and the tree built above easily fits, so every page
+        // touched during setup is still resident. Without reopening, pages_read
+        // would report 0 for ANY query afterward (TableSeek or a full SeqScan
+        // alike), making the assertion below vacuously true regardless of which
+        // operator actually ran -- proving nothing about page efficiency.
+        drop(pager);
+        let mut pager = Pager::open(file.path()).unwrap();
 
         let predicate = Expr::BinaryOp {
             op: crate::sql::ast::BinOp::Eq,
             left: Box::new(Expr::Column("id".into())),
-            right: Box::new(Expr::IntLiteral(250)),
+            right: Box::new(Expr::IntLiteral(2500)),
         };
         pager.reset_read_counter();
         let mut plan = build_select_plan(&schema, Some(predicate), vec![0]);
@@ -5629,19 +5637,47 @@ Add to the `tests` module in `src/plan/planner.rs`:
         while let Some(row) = plan.next(&mut pager).unwrap() {
             rows.push(row);
         }
-        assert_eq!(rows, vec![vec![Value::Integer(250)]]);
+        assert_eq!(rows, vec![vec![Value::Integer(2500)]]);
+        let table_seek_pages = pager.stats().pages_read;
         assert!(
-            pager.stats().pages_read < 10,
-            "a PK-equality lookup on a 500-row tree should touch only a handful of pages, touched {}",
-            pager.stats().pages_read
+            table_seek_pages < 20,
+            "a PK-equality lookup on a 5000-row tree should touch only a handful of pages, touched {table_seek_pages}"
         );
+
+        // Directly prove the optimization's value, not just an absolute threshold:
+        // reopen again (cold cache) and run the SAME predicate through a hand-built
+        // SeqScan + Filter plan (Task 28's pre-TableSeek behavior), which must walk
+        // the entire leaf chain and therefore read strictly more pages.
+        drop(pager);
+        let mut pager = Pager::open(file.path()).unwrap();
+        pager.reset_read_counter();
+        let seq_scan: Box<dyn crate::exec::Operator> = Box::new(SeqScan::new(schema.clone()));
+        let mut seq_plan = Filter { input: seq_scan, schema: schema.clone(), predicate: predicate_for_seq_scan() };
+        let mut seq_rows = Vec::new();
+        while let Some(row) = seq_plan.next(&mut pager).unwrap() {
+            seq_rows.push(row);
+        }
+        assert_eq!(seq_rows, vec![vec![Value::Integer(2500)]]);
+        let seq_scan_pages = pager.stats().pages_read;
+        assert!(
+            table_seek_pages < seq_scan_pages,
+            "TableSeek ({table_seek_pages} pages) should read strictly fewer pages than a full SeqScan ({seq_scan_pages} pages) for the same predicate"
+        );
+    }
+
+    fn predicate_for_seq_scan() -> Expr {
+        Expr::BinaryOp {
+            op: crate::sql::ast::BinOp::Eq,
+            left: Box::new(Expr::Column("id".into())),
+            right: Box::new(Expr::IntLiteral(2500)),
+        }
     }
 ```
 
 - [ ] **Step 6: Run test to verify it fails**
 
 Run: `cargo test plan::planner::tests::pk_equality_predicate_uses_table_seek_and_touches_few_pages`
-Expected: FAIL — this test may actually pass numerically by accident if `SeqScan` over 500 small rows still touches under 10 pages; strengthen the assertion by increasing to 5000 rows if needed so the difference between `O(1)` seek and `O(n)` scan is unambiguous. Use 5000 in the final test if 500 doesn't clearly fail against the old `SeqScan`-only planner.
+Expected: FAIL — before `TableSeek` exists, `build_select_plan` routes everything through `SeqScan`, so this test fails to compile/run against the old planner. Note: an earlier version of this test used a warm pager cache and a bare `pages_read < N` threshold, which is vacuously true regardless of which operator ran (the 256-page LRU cache holds the whole 500-row tree, so `pages_read` reports 0 either way). The corrected version above reopens the pager (cold cache) before each measurement and adds a direct comparative assertion against a hand-built `SeqScan` + `Filter` plan, proving `TableSeek` genuinely reads fewer pages rather than just satisfying an arbitrary threshold.
 
 - [ ] **Step 7: Implement the primary-key routing rule**
 

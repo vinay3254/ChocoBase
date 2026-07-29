@@ -1,12 +1,21 @@
+use crate::error::PlanError;
 use crate::exec::filter::Filter;
+use crate::exec::limit::Limit;
 use crate::exec::project::Project;
 use crate::exec::scan::{SeqScan, TableSeek};
+use crate::exec::sort::Sort;
 use crate::exec::Operator;
 use crate::sql::ast::{BinOp, Expr};
 use crate::types::schema::TableSchema;
 use crate::types::value::{encode_key, Value};
 
-pub fn build_select_plan(schema: &TableSchema, where_clause: Option<Expr>, projection_indices: Vec<usize>) -> Box<dyn Operator> {
+pub fn build_select_plan(
+    schema: &TableSchema,
+    where_clause: Option<Expr>,
+    projection_indices: Vec<usize>,
+    order_by: Option<(String, bool)>,
+    limit: Option<i64>,
+) -> Result<Box<dyn Operator>, PlanError> {
     let pk_col = schema.columns[schema.primary_key_index()].name.clone();
     let (pk_value, residual) = extract_pk_equality(where_clause, &pk_col);
 
@@ -17,7 +26,15 @@ pub fn build_select_plan(schema: &TableSchema, where_clause: Option<Expr>, proje
     if let Some(predicate) = residual {
         plan = Box::new(Filter { input: plan, schema: schema.clone(), predicate });
     }
-    Box::new(Project { input: plan, indices: projection_indices })
+    if let Some((col, desc)) = order_by {
+        let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
+        plan = Box::new(Sort::new(plan, idx, desc));
+    }
+    plan = Box::new(Project { input: plan, indices: projection_indices });
+    if let Some(n) = limit {
+        plan = Box::new(Limit::new(plan, n));
+    }
+    Ok(plan)
 }
 
 fn split_and_conjuncts(expr: Expr, out: &mut Vec<Expr>) {
@@ -133,7 +150,7 @@ mod tests {
             left: Box::new(Expr::Column("id".into())),
             right: Box::new(Expr::IntLiteral(1)),
         };
-        let mut plan = build_select_plan(&schema, Some(predicate), vec![1]); // project just "name"
+        let mut plan = build_select_plan(&schema, Some(predicate), vec![1], None, None).unwrap(); // project just "name"
 
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut pager).unwrap() {
@@ -164,6 +181,14 @@ mod tests {
         };
         schema.root_page = final_root;
         pager.flush().unwrap();
+        // Force a genuinely cold cache before measuring: the pager's LRU cache
+        // holds 256 pages, and the tree built above easily fits, so every page
+        // touched during setup is still resident. Without reopening, pages_read
+        // would report 0 for ANY query afterward (TableSeek or a full SeqScan
+        // alike), making the assertion below vacuously true regardless of which
+        // operator actually ran -- proving nothing about page efficiency.
+        drop(pager);
+        let mut pager = Pager::open(file.path()).unwrap();
 
         let predicate = Expr::BinaryOp {
             op: crate::sql::ast::BinOp::Eq,
@@ -171,16 +196,44 @@ mod tests {
             right: Box::new(Expr::IntLiteral(2500)),
         };
         pager.reset_read_counter();
-        let mut plan = build_select_plan(&schema, Some(predicate), vec![0]);
+        let mut plan = build_select_plan(&schema, Some(predicate), vec![0], None, None).unwrap();
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut pager).unwrap() {
             rows.push(row);
         }
         assert_eq!(rows, vec![vec![Value::Integer(2500)]]);
+        let table_seek_pages = pager.stats().pages_read;
         assert!(
-            pager.stats().pages_read < 20,
-            "a PK-equality lookup on a 5000-row tree should touch only a handful of pages, touched {}",
-            pager.stats().pages_read
+            table_seek_pages < 20,
+            "a PK-equality lookup on a 5000-row tree should touch only a handful of pages, touched {table_seek_pages}"
         );
+
+        // Directly prove the optimization's value, not just an absolute threshold:
+        // reopen again (cold cache) and run the SAME predicate through a hand-built
+        // SeqScan + Filter plan (Task 28's pre-TableSeek behavior), which must walk
+        // the entire leaf chain and therefore read strictly more pages.
+        drop(pager);
+        let mut pager = Pager::open(file.path()).unwrap();
+        pager.reset_read_counter();
+        let seq_scan: Box<dyn crate::exec::Operator> = Box::new(SeqScan::new(schema.clone()));
+        let mut seq_plan = Filter { input: seq_scan, schema: schema.clone(), predicate: predicate_for_seq_scan() };
+        let mut seq_rows = Vec::new();
+        while let Some(row) = seq_plan.next(&mut pager).unwrap() {
+            seq_rows.push(row);
+        }
+        assert_eq!(seq_rows, vec![vec![Value::Integer(2500)]]);
+        let seq_scan_pages = pager.stats().pages_read;
+        assert!(
+            table_seek_pages < seq_scan_pages,
+            "TableSeek ({table_seek_pages} pages) should read strictly fewer pages than a full SeqScan ({seq_scan_pages} pages) for the same predicate"
+        );
+    }
+
+    fn predicate_for_seq_scan() -> Expr {
+        Expr::BinaryOp {
+            op: crate::sql::ast::BinOp::Eq,
+            left: Box::new(Expr::Column("id".into())),
+            right: Box::new(Expr::IntLiteral(2500)),
+        }
     }
 }
