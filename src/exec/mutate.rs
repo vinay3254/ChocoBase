@@ -68,6 +68,31 @@ pub fn delete_row(
     Ok((new_table_root, new_index_roots))
 }
 
+pub fn update_row(
+    pager: &mut Pager,
+    schema: &TableSchema,
+    indexes: &[IndexSchema],
+    old_row: &[Value],
+    new_row: &[Value],
+) -> Result<(u32, Vec<(String, u32)>), ExecError> {
+    let (table_root_after_delete, index_roots_after_delete) = delete_row(pager, schema, indexes, old_row)?;
+
+    let mut schema_after_delete = schema.clone();
+    schema_after_delete.root_page = table_root_after_delete;
+    let indexes_after_delete: Vec<IndexSchema> = indexes
+        .iter()
+        .cloned()
+        .map(|mut idx| {
+            if let Some((_, root)) = index_roots_after_delete.iter().find(|(name, _)| name == &idx.name) {
+                idx.root_page = *root;
+            }
+            idx
+        })
+        .collect();
+
+    insert_row(pager, &schema_after_delete, &indexes_after_delete, new_row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +214,38 @@ mod tests {
         let mut ibt = BTree::new(&mut pager, new_index_roots[0].1);
         let idx_key = crate::types::value::encode_composite_key(&[Value::Text("a".into()), Value::Integer(1)]);
         assert_eq!(ibt.search(&idx_key).unwrap(), None);
+    }
+
+    #[test]
+    fn updates_row_and_reindexes_changed_column() {
+        let file = NamedTempFile::new().unwrap();
+        let mut pager = Pager::create(file.path()).unwrap();
+        let table_root = pager.allocate_page().unwrap();
+        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(table_root).unwrap());
+        let index_root = pager.allocate_page().unwrap();
+        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(index_root).unwrap());
+        let s = schema(table_root);
+        let idx = IndexSchema { name: "idx_name".into(), table: "t".into(), column: "name".into(), root_page: index_root };
+
+        let (table_root, roots) = insert_row(&mut pager, &s, &[idx.clone()], &[Value::Integer(1), Value::Text("a".into())]).unwrap();
+        let mut s2 = s.clone();
+        s2.root_page = table_root;
+        let mut idx2 = idx.clone();
+        idx2.root_page = roots[0].1;
+
+        let old_row = vec![Value::Integer(1), Value::Text("a".into())];
+        let new_row = vec![Value::Integer(1), Value::Text("z".into())];
+        let (new_table_root, new_index_roots) =
+            update_row(&mut pager, &s2, &[idx2.clone()], &old_row, &new_row).unwrap();
+
+        let mut bt = BTree::new(&mut pager, new_table_root);
+        let payload = bt.search(&crate::types::value::encode_key(&Value::Integer(1))).unwrap().unwrap();
+        assert_eq!(crate::types::row::decode_row(&s2, &payload), new_row);
+
+        let mut ibt = BTree::new(&mut pager, new_index_roots[0].1);
+        let old_key = crate::types::value::encode_composite_key(&[Value::Text("a".into()), Value::Integer(1)]);
+        let new_key = crate::types::value::encode_composite_key(&[Value::Text("z".into()), Value::Integer(1)]);
+        assert_eq!(ibt.search(&old_key).unwrap(), None);
+        assert_eq!(ibt.search(&new_key).unwrap(), Some(vec![]));
     }
 }
