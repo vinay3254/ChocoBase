@@ -56,6 +56,8 @@ impl Parser {
             Token::Drop => self.parse_drop()?,
             Token::Insert => self.parse_insert()?,
             Token::Select => self.parse_select()?,
+            Token::Update => self.parse_update()?,
+            Token::Delete => self.parse_delete()?,
             _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected a statement".into() }),
         };
         if matches!(self.peek(), Token::Semicolon) {
@@ -68,7 +70,7 @@ impl Parser {
         self.expect(&Token::Create)?;
         match self.peek() {
             Token::Table => self.parse_create_table(),
-            Token::Index => Err(ParseError::Syntax { offset: self.peek_offset(), message: "CREATE INDEX not yet implemented".into() }),
+            Token::Index => self.parse_create_index(),
             _ => Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected TABLE or INDEX after CREATE".into() }),
         }
     }
@@ -112,7 +114,7 @@ impl Parser {
         let offset = self.peek_offset();
         match self.advance() {
             Token::Table => Ok(Statement::DropTable { name: self.expect_identifier()? }),
-            Token::Index => Err(ParseError::Syntax { offset, message: "DROP INDEX not yet implemented".into() }),
+            Token::Index => Ok(Statement::DropIndex { name: self.expect_identifier()? }),
             other => Err(ParseError::Syntax { offset, message: format!("expected TABLE or INDEX, found {other:?}") }),
         }
     }
@@ -285,6 +287,54 @@ impl Parser {
 
         Ok(Statement::Select { columns, table, where_clause, order_by, limit })
     }
+
+    fn parse_create_index(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Index)?;
+        let name = self.expect_identifier()?;
+        self.expect(&Token::On)?;
+        let table = self.expect_identifier()?;
+        self.expect(&Token::LParen)?;
+        let column = self.expect_identifier()?;
+        self.expect(&Token::RParen)?;
+        Ok(Statement::CreateIndex { name, table, column })
+    }
+
+    fn parse_update(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Update)?;
+        let table = self.expect_identifier()?;
+        self.expect(&Token::Set)?;
+        let mut assignments = Vec::new();
+        loop {
+            let col = self.expect_identifier()?;
+            self.expect(&Token::Eq)?;
+            let value = self.parse_primary_expr()?;
+            assignments.push((col, value));
+            match self.peek() {
+                Token::Comma => { self.advance(); }
+                _ => break,
+            }
+        }
+        let where_clause = if matches!(self.peek(), Token::Where) {
+            self.advance();
+            Some(self.parse_where_expr()?)
+        } else {
+            None
+        };
+        Ok(Statement::Update { table, assignments, where_clause })
+    }
+
+    fn parse_delete(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Delete)?;
+        self.expect(&Token::From)?;
+        let table = self.expect_identifier()?;
+        let where_clause = if matches!(self.peek(), Token::Where) {
+            self.advance();
+            Some(self.parse_where_expr()?)
+        } else {
+            None
+        };
+        Ok(Statement::Delete { table, where_clause })
+    }
 }
 
 pub fn parse(sql: &str) -> Result<Statement, ParseError> {
@@ -394,5 +444,50 @@ mod tests {
             }
             other => panic!("unexpected parse result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_update() {
+        let stmt = parse("UPDATE t SET name = 'Bea', active = FALSE WHERE id = 1").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Update {
+                table: "t".into(),
+                assignments: vec![
+                    ("name".into(), Expr::StringLiteral("Bea".into())),
+                    ("active".into(), Expr::BoolLiteral(false)),
+                ],
+                where_clause: Some(Expr::BinaryOp {
+                    op: BinOp::Eq,
+                    left: Box::new(Expr::Column("id".into())),
+                    right: Box::new(Expr::IntLiteral(1)),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_delete() {
+        let stmt = parse("DELETE FROM t WHERE id = 1").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Delete {
+                table: "t".into(),
+                where_clause: Some(Expr::BinaryOp {
+                    op: BinOp::Eq,
+                    left: Box::new(Expr::Column("id".into())),
+                    right: Box::new(Expr::IntLiteral(1)),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_create_index_and_drop_index() {
+        assert_eq!(
+            parse("CREATE INDEX idx_name ON t (name)").unwrap(),
+            Statement::CreateIndex { name: "idx_name".into(), table: "t".into(), column: "name".into() }
+        );
+        assert_eq!(parse("DROP INDEX idx_name").unwrap(), Statement::DropIndex { name: "idx_name".into() });
     }
 }
