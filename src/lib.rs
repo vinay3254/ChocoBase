@@ -9,4 +9,4 @@ pub mod exec;
 pub mod engine;
 
 pub use error::{DbError, Result};
-pub use engine::Database;
+pub use engine::{Database, ExecResult};
