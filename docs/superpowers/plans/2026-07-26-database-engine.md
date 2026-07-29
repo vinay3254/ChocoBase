@@ -4675,6 +4675,8 @@ mod tests {
             columns: vec![Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true }],
             root_page: 0,
         };
+        // `Fixed` yields via Vec::pop(), which returns the LAST element first: this
+        // list is consumed in the order 1, 2, 3 (not the 3, 2, 1 it's written in).
         let input = Fixed(vec![
             vec![Value::Integer(3)],
             vec![Value::Integer(2)],
@@ -4690,7 +4692,8 @@ mod tests {
         while let Some(row) = filter.next(&mut pager).unwrap() {
             seen.push(row[0].clone());
         }
-        assert_eq!(seen, vec![Value::Integer(1), Value::Integer(2)]);
+        // Stream order is [1, 2, 3]; id > 1 excludes 1 and keeps 2 and 3.
+        assert_eq!(seen, vec![Value::Integer(2), Value::Integer(3)]);
     }
 }
 ```
