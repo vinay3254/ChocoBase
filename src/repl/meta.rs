@@ -11,6 +11,9 @@ pub fn dispatch(db: &mut Database, cmd: &str) -> String {
     if let Some(rest) = cmd.strip_prefix("indexes") {
         return indexes_text(db, rest.trim());
     }
+    if let Some(rest) = cmd.strip_prefix("btree") {
+        return btree_text(db, rest.trim());
+    }
     format!("unknown command: .{cmd}")
 }
 
@@ -52,6 +55,13 @@ fn indexes_text(db: &mut Database, table: &str) -> String {
         .map(|i| format!("{} ON {} ({})", i.name, i.table, i.column))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn btree_text(db: &mut Database, table: &str) -> String {
+    match db.dump_table_btree(table) {
+        Some(text) => text,
+        None => format!("no such table: {table}"),
+    }
 }
 
 #[cfg(test)]
@@ -102,5 +112,15 @@ mod tests {
     fn unknown_command_reports_error() {
         let mut db = db_with_one_table();
         assert!(dispatch(&mut db, "bogus").contains("unknown command"));
+    }
+
+    #[test]
+    fn btree_dumps_table_structure() {
+        let mut db = db_with_one_table();
+        for i in 0..50 {
+            db.execute(&format!("INSERT INTO users (id, name) VALUES ({i}, 'n{i}')")).unwrap();
+        }
+        let out = dispatch(&mut db, "btree users");
+        assert!(out.contains("leaf page"));
     }
 }
