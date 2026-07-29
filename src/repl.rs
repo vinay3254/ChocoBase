@@ -1,3 +1,5 @@
+pub mod meta;
+
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
@@ -47,7 +49,7 @@ pub fn run(mut db: Database) {
                     if trimmed == ".exit" {
                         break;
                     }
-                    println!("unknown command: {trimmed}");
+                    println!("{}", meta::dispatch(&mut db, &trimmed[1..]));
                     continue;
                 }
 
