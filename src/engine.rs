@@ -370,6 +370,12 @@ impl Database {
     pub fn list_indexes(&mut self, table: &str) -> Vec<crate::types::schema::IndexSchema> {
         self.catalog.list_indexes_for_table(&mut self.pager, table).unwrap_or_default()
     }
+
+    pub fn dump_table_btree(&mut self, table: &str) -> Option<String> {
+        let schema = self.table_schema(table)?;
+        let mut bt = crate::btree::tree::BTree::new(&mut self.pager, schema.root_page);
+        Some(bt.dump())
+    }
 }
 
 fn literal_to_value(expr: &Expr) -> Result<Value> {
