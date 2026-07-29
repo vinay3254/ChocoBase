@@ -32,7 +32,6 @@ impl Operator for Filter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::scan::SeqScan;
     use crate::sql::ast::BinOp;
     use crate::types::schema::Column;
     use crate::types::value::ColumnType;
