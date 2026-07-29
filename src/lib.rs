@@ -7,6 +7,7 @@ pub mod sql;
 pub mod plan;
 pub mod exec;
 pub mod engine;
+pub mod repl;
 
 pub use error::{DbError, Result};
 pub use engine::{Database, ExecResult};
