@@ -358,6 +358,18 @@ impl Database {
 
         Ok(ExecResult::Modified(count))
     }
+
+    pub fn list_tables(&mut self) -> Vec<String> {
+        self.catalog.list_tables(&mut self.pager).unwrap_or_default()
+    }
+
+    pub fn table_schema(&mut self, name: &str) -> Option<TableSchema> {
+        self.catalog.get_table(&mut self.pager, name).ok().flatten()
+    }
+
+    pub fn list_indexes(&mut self, table: &str) -> Vec<crate::types::schema::IndexSchema> {
+        self.catalog.list_indexes_for_table(&mut self.pager, table).unwrap_or_default()
+    }
 }
 
 fn literal_to_value(expr: &Expr) -> Result<Value> {
