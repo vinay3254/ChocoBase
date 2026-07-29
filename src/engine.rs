@@ -40,7 +40,10 @@ impl Database {
             Statement::CreateTable { name, columns } => self.execute_create_table(name, columns)?,
             Statement::DropTable { name } => self.execute_drop_table(&name)?,
             Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows)?,
-            Statement::Select { columns, table, where_clause, order_by: _order_by, limit: _limit } => self.execute_select(columns, &table, where_clause)?,
+            Statement::Select { columns, table, where_clause, order_by, limit } => {
+                self.execute_select(columns, &table, where_clause, order_by, limit)?
+            }
+            Statement::Delete { table, where_clause } => self.execute_delete(&table, where_clause)?,
             other => {
                 return Err(DbError::Plan(PlanError::InvalidSchema(format!(
                     "statement not yet supported: {other:?}"
@@ -151,7 +154,14 @@ impl Database {
         Ok(ExecResult::Modified(count))
     }
 
-    fn execute_select(&mut self, columns: SelectColumns, table: &str, where_clause: Option<Expr>) -> Result<ExecResult> {
+    fn execute_select(
+        &mut self,
+        columns: SelectColumns,
+        table: &str,
+        where_clause: Option<Expr>,
+        order_by: Option<(String, bool)>,
+        limit: Option<i64>,
+    ) -> Result<ExecResult> {
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
@@ -171,12 +181,65 @@ impl Database {
             }
         };
 
-        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, indices);
+        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, indices, order_by, limit)?;
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             rows.push(row);
         }
         Ok(ExecResult::Rows { columns: out_names, rows })
+    }
+
+    fn execute_delete(&mut self, table: &str, where_clause: Option<Expr>) -> Result<ExecResult> {
+        let schema = self
+            .catalog
+            .get_table(&mut self.pager, table)?
+            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+
+        let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
+        let mut plan = crate::plan::planner::build_select_plan(&schema, where_clause, all_columns, None, None)?;
+        let mut rows_to_delete = Vec::new();
+        while let Some(row) = plan.next(&mut self.pager)? {
+            rows_to_delete.push(row);
+        }
+
+        let mut table_root = schema.root_page;
+        let mut index_roots: HashMap<String, u32> =
+            indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
+        let mut count = 0usize;
+
+        for row in &rows_to_delete {
+            let mut schema_for_write = schema.clone();
+            schema_for_write.root_page = table_root;
+            let indexes_for_write: Vec<IndexSchema> = indexes
+                .iter()
+                .cloned()
+                .map(|mut idx| {
+                    idx.root_page = index_roots[&idx.name];
+                    idx
+                })
+                .collect();
+
+            let (new_table_root, new_index_roots) =
+                crate::exec::mutate::delete_row(&mut self.pager, &schema_for_write, &indexes_for_write, row)?;
+            table_root = new_table_root;
+            for (name, root) in new_index_roots {
+                index_roots.insert(name, root);
+            }
+            count += 1;
+        }
+
+        if table_root != schema.root_page {
+            self.catalog.update_table_root(&mut self.pager, table, table_root)?;
+        }
+        for idx in &indexes {
+            let new_root = index_roots[&idx.name];
+            if new_root != idx.root_page {
+                self.catalog.update_index_root(&mut self.pager, &idx.name, new_root)?;
+            }
+        }
+
+        Ok(ExecResult::Modified(count))
     }
 }
 
@@ -272,6 +335,42 @@ mod tests {
             ExecResult::Rows { columns, rows } => {
                 assert_eq!(columns, vec!["name".to_string()]);
                 assert_eq!(rows, vec![vec![Value::Text("b".into())], vec![Value::Text("c".into())]]);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_with_order_by_and_limit() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, score INTEGER)").unwrap();
+        db.execute("INSERT INTO t (id, score) VALUES (1, 30), (2, 10), (3, 20)").unwrap();
+
+        let result = db.execute("SELECT id FROM t ORDER BY score LIMIT 2").unwrap();
+        match result {
+            ExecResult::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_removes_matching_rows_only() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        db.execute("INSERT INTO t (id) VALUES (1), (2), (3)").unwrap();
+
+        assert_eq!(db.execute("DELETE FROM t WHERE id = 2").unwrap(), ExecResult::Modified(1));
+
+        let result = db.execute("SELECT id FROM t").unwrap();
+        match result {
+            ExecResult::Rows { rows, .. } => {
+                let mut remaining: Vec<i64> = rows.iter().map(|r| match &r[0] { Value::Integer(n) => *n, _ => unreachable!() }).collect();
+                remaining.sort();
+                assert_eq!(remaining, vec![1, 3]);
             }
             other => panic!("unexpected result: {other:?}"),
         }
