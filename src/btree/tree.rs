@@ -455,6 +455,42 @@ impl<'a> BTree<'a> {
 
         self.rebalance_internal(path, parent_no)
     }
+
+    pub fn dump(&mut self) -> String {
+        let mut out = String::new();
+        self.dump_node(self.root, 0, &mut out);
+        out
+    }
+
+    fn dump_node(&mut self, page_no: u32, depth: usize, out: &mut String) {
+        let page = match self.pager.get_page(page_no) {
+            Ok(p) => p.clone(),
+            Err(e) => {
+                out.push_str(&format!("{}page {page_no}: error reading page: {e}\n", "  ".repeat(depth)));
+                return;
+            }
+        };
+        let indent = "  ".repeat(depth);
+        match page.page_type() {
+            crate::storage::page::PAGE_TYPE_LEAF => {
+                let node = LeafNode::decode(&page);
+                out.push_str(&format!("{indent}leaf page {page_no}: {} entries\n", node.entries.len()));
+            }
+            crate::storage::page::PAGE_TYPE_INTERNAL => {
+                let node = InternalNode::decode(&page);
+                out.push_str(&format!(
+                    "{indent}internal page {page_no}: {} keys, {} children\n",
+                    node.entries.len(),
+                    node.entries.len() + 1
+                ));
+                for e in &node.entries {
+                    self.dump_node(e.left_child, depth + 1, out);
+                }
+                self.dump_node(node.rightmost_child, depth + 1, out);
+            }
+            t => out.push_str(&format!("{indent}page {page_no}: unknown page type {t}\n")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -514,6 +550,18 @@ mod tests {
         LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root).unwrap());
         pager.flush().unwrap();
         (pager, root)
+    }
+
+    #[test]
+    fn dump_shows_every_node_and_reports_split_height() {
+        let (mut pager, root) = empty_tree();
+        let mut bt = BTree::new(&mut pager, root);
+        for i in 0..400i64 {
+            bt.insert(&(i as u64).to_be_bytes(), b"v").unwrap();
+        }
+        let dump = bt.dump();
+        assert!(dump.contains("leaf"));
+        assert!(dump.contains("internal"), "400 small keys must have split into a multi-level tree");
     }
 
     #[test]
