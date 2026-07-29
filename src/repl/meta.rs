@@ -14,6 +14,9 @@ pub fn dispatch(db: &mut Database, cmd: &str) -> String {
     if let Some(rest) = cmd.strip_prefix("btree") {
         return btree_text(db, rest.trim());
     }
+    if cmd == "stats" {
+        return stats_text(db);
+    }
     format!("unknown command: .{cmd}")
 }
 
@@ -62,6 +65,14 @@ fn btree_text(db: &mut Database, table: &str) -> String {
         Some(text) => text,
         None => format!("no such table: {table}"),
     }
+}
+
+fn stats_text(db: &mut Database) -> String {
+    let s = db.pager_stats();
+    format!(
+        "pages: {}\nfreelist: {}\ncached pages: {}\npages read since last statement: {}",
+        s.page_count, s.freelist_head, s.cached_pages, s.pages_read
+    )
 }
 
 #[cfg(test)]
@@ -122,5 +133,14 @@ mod tests {
         }
         let out = dispatch(&mut db, "btree users");
         assert!(out.contains("leaf page"));
+    }
+
+    #[test]
+    fn stats_reports_page_count_and_reads() {
+        let mut db = db_with_one_table();
+        let out = dispatch(&mut db, "stats");
+        assert!(out.contains("pages:"));
+        assert!(out.contains("freelist:"));
+        assert!(out.contains("pages read since last statement:"));
     }
 }

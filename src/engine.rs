@@ -376,6 +376,14 @@ impl Database {
         let mut bt = crate::btree::tree::BTree::new(&mut self.pager, schema.root_page);
         Some(bt.dump())
     }
+
+    pub fn pager_stats(&self) -> crate::storage::pager::PagerStats {
+        self.pager.stats()
+    }
+
+    pub fn reset_read_counter(&mut self) {
+        self.pager.reset_read_counter();
+    }
 }
 
 fn literal_to_value(expr: &Expr) -> Result<Value> {

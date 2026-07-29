@@ -56,6 +56,7 @@ pub fn run(mut db: Database) {
                 buffer.push_str(&line);
                 buffer.push('\n');
                 if buffer.trim_end().ends_with(';') {
+                    db.reset_read_counter();
                     match db.execute(buffer.trim()) {
                         Ok(result) => println!("{}", format_result(&result)),
                         Err(e) => println!("error: {e}"),
