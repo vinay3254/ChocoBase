@@ -149,6 +149,20 @@ async fn handle_http_connection(
         ""
     };
 
+    const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10MB limit
+    if body.len() > MAX_PAYLOAD_BYTES {
+        let resp_json = serde_json::json!({ "error": "payload too large" });
+        let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
+        let header = format!(
+            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            resp_bytes.len()
+        );
+        socket.write_all(header.as_bytes()).await?;
+        socket.write_all(&resp_bytes).await?;
+        socket.flush().await?;
+        return Ok(());
+    }
+
     if method == "GET" && (path == "/" || path == "/dashboard") {
         let header = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
