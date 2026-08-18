@@ -5,7 +5,7 @@ use crate::btree::tree::BTree;
 use crate::error::{BTreeError, DbError, PlanError, StorageError};
 use crate::storage::page::{PAGE_TYPE_INTERNAL, PAGE_TYPE_LEAF};
 use crate::storage::pager::Pager;
-use crate::types::schema::{IndexSchema, TableSchema};
+use crate::types::schema::{IndexSchema, PolicySchema, TableSchema};
 use crate::types::value::{encode_key, Value};
 use record::*;
 
@@ -154,6 +154,62 @@ impl Catalog {
         }
         Ok(result)
     }
+
+    fn policy_key(name: &str) -> Vec<u8> {
+        encode_key(&Value::Text(format!("policy:{name}")))
+    }
+
+    pub fn set_table_rls(&mut self, pager: &mut Pager, table: &str, enabled: bool) -> Result<(), DbError> {
+        let mut schema = self
+            .get_table(pager, table)?
+            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+        schema.rls_enabled = enabled;
+        let key = Self::table_key(table);
+        let mut bt = BTree::new(pager, self.root);
+        bt.delete(&key)?;
+        bt.insert(&key, &encode_table_record(&schema))?;
+        self.root = bt.root();
+        pager.set_catalog_root(self.root)?;
+        Ok(())
+    }
+
+    pub fn create_policy(&mut self, pager: &mut Pager, policy: &PolicySchema) -> Result<(), DbError> {
+        let key = Self::policy_key(&policy.name);
+        let mut bt = BTree::new(pager, self.root);
+        bt.insert(&key, &encode_policy_record(policy)).map_err(|e| match e {
+            BTreeError::DuplicateKey => DbError::Plan(PlanError::TableAlreadyExists(policy.name.clone())),
+            other => DbError::BTree(other),
+        })?;
+        self.root = bt.root();
+        pager.set_catalog_root(self.root)?;
+        Ok(())
+    }
+
+    pub fn drop_policy(&mut self, pager: &mut Pager, name: &str) -> Result<(), DbError> {
+        let key = Self::policy_key(name);
+        let mut bt = BTree::new(pager, self.root);
+        bt.delete(&key)?;
+        self.root = bt.root();
+        pager.set_catalog_root(self.root)?;
+        Ok(())
+    }
+
+    pub fn list_policies_for_table(&mut self, pager: &mut Pager, table: &str) -> Result<Vec<PolicySchema>, DbError> {
+        let mut cursor = {
+            let mut bt = BTree::new(pager, self.root);
+            bt.cursor_start()?
+        };
+        let mut result = Vec::new();
+        while let Some((_, payload)) = cursor.next(pager)? {
+            if record_kind(&payload) == KIND_POLICY {
+                let pol = decode_policy_record(&payload);
+                if pol.table == table {
+                    result.push(pol);
+                }
+            }
+        }
+        Ok(result)
+    }
 }
 
 fn walk_and_free(pager: &mut Pager, page_no: u32) -> Result<(), StorageError> {
@@ -189,6 +245,7 @@ mod tests {
                 Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true },
             ],
             root_page: 0, // filled in by the caller after allocating a table root
+            rls_enabled: false,
         }
     }
 
