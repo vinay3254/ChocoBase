@@ -16,6 +16,9 @@ pub enum Statement {
     },
     Update { table: String, assignments: Vec<(String, Expr)>, where_clause: Option<Expr> },
     Delete { table: String, where_clause: Option<Expr> },
+    Begin,
+    Commit,
+    Rollback,
 }
 
 #[derive(Debug, Clone, PartialEq)]
