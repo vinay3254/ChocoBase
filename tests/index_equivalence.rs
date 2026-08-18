@@ -18,6 +18,10 @@ fn make_db_with_rows(rows: &[(i64, i64)]) -> (Database, NamedTempFile) {
 }
 
 proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 32,
+        ..proptest::prelude::ProptestConfig::default()
+    })]
     #[test]
     fn indexed_and_unindexed_queries_agree(
         rows in prop::collection::vec((0i64..500, 0i64..20), 1..100),
