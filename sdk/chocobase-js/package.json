@@ -1,0 +1,24 @@
+{
+  "name": "@chocobase/chocobase-js",
+  "version": "0.1.0",
+  "description": "Isomorphic JavaScript/TypeScript client for ChocoBase",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test"
+  },
+  "keywords": [
+    "chocobase",
+    "supabase",
+    "database",
+    "auth",
+    "storage",
+    "realtime"
+  ],
+  "author": "ChocoBase Contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
