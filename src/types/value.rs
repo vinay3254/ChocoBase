@@ -3,18 +3,60 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnType {
     Integer,
+    Float,
     Text,
     Boolean,
     Json,
+    Vector(usize),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Integer(i64),
+    Float(f64),
     Text(String),
     Boolean(bool),
     Json(String),
+    Vector(Vec<f32>),
     Null,
+}
+
+impl Eq for Value {}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Value::Integer(i) => {
+                0u8.hash(state);
+                i.hash(state);
+            }
+            Value::Float(f) => {
+                1u8.hash(state);
+                f.to_bits().hash(state);
+            }
+            Value::Text(s) => {
+                2u8.hash(state);
+                s.hash(state);
+            }
+            Value::Boolean(b) => {
+                3u8.hash(state);
+                b.hash(state);
+            }
+            Value::Json(s) => {
+                4u8.hash(state);
+                s.hash(state);
+            }
+            Value::Vector(v) => {
+                5u8.hash(state);
+                for elem in v {
+                    elem.to_bits().hash(state);
+                }
+            }
+            Value::Null => {
+                6u8.hash(state);
+            }
+        }
+    }
 }
 
 pub fn encode_key(v: &Value) -> Vec<u8> {
@@ -23,10 +65,18 @@ pub fn encode_key(v: &Value) -> Vec<u8> {
             let flipped = (*i as u64) ^ 0x8000_0000_0000_0000;
             flipped.to_be_bytes().to_vec()
         }
+        Value::Float(f) => f.to_be_bytes().to_vec(),
         Value::Boolean(b) => vec![if *b { 1 } else { 0 }],
         Value::Text(s) | Value::Json(s) => {
             let mut out = s.as_bytes().to_vec();
             out.push(0);
+            out
+        }
+        Value::Vector(vec) => {
+            let mut out = Vec::with_capacity(vec.len() * 4);
+            for elem in vec {
+                out.extend(elem.to_be_bytes());
+            }
             out
         }
         Value::Null => panic!("NULL cannot be encoded as a key"),
@@ -44,9 +94,19 @@ pub fn encode_composite_key(parts: &[Value]) -> Vec<u8> {
 pub fn sql_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Integer(x), Value::Float(y)) => (*x as f64)
+            .partial_cmp(y)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Float(x), Value::Integer(y)) => x
+            .partial_cmp(&(*y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
         (Value::Text(x), Value::Text(y)) => x.cmp(y),
         (Value::Json(x), Value::Json(y)) => x.cmp(y),
         (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
+        (Value::Vector(x), Value::Vector(y)) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
         _ => panic!(
             "cannot compare values of different types: {:?} vs {:?}",
             a, b
