@@ -55,8 +55,8 @@ pub fn run(mut db: Database) {
                     if trimmed == ".exit" {
                         break;
                     }
-                    if trimmed.starts_with('.') {
-                        println!("{}", meta::dispatch(&mut db, &trimmed[1..]));
+                    if let Some(cmd) = trimmed.strip_prefix('.') {
+                        println!("{}", meta::dispatch(&mut db, cmd));
                     }
                     continue;
                 }
