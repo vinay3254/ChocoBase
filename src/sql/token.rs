@@ -2,7 +2,7 @@
 pub enum Token {
     Create, Table, Drop, Index, On, Insert, Into, Values, Select, From, Where,
     Update, Set, Delete, Order, By, Asc, Desc, Limit, Not, Null, Primary, Key,
-    And, Or, Is,
+    And, Or, Is, Begin, Commit, Rollback, Transaction,
     KwInteger, KwText, KwBoolean,
     Identifier(String),
     IntLiteral(i64),
