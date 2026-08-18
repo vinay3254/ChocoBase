@@ -207,6 +207,57 @@ async fn handle_http_connection(
             "OK",
             serde_json::json!({ "page_count": stats.page_count, "pages_read": stats.pages_read, "cached_pages": stats.cached_pages }),
         )
+    } else if method == "GET" && path == "/v1/admin/dump" {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else {
+            match db.dump_sql() {
+                Ok(dump_sql) => (
+                    200,
+                    "OK",
+                    serde_json::json!({ "status": "ok", "dump": dump_sql }),
+                ),
+                Err(e) => (
+                    500,
+                    "Internal Server Error",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        }
+    } else if method == "POST" && path == "/v1/admin/restore" {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else {
+            let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(body) {
+                parsed_json
+                    .get("sql")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| body.to_string())
+            } else {
+                body.trim().to_string()
+            };
+            match db.restore_from_sql(&sql) {
+                Ok(count) => (
+                    200,
+                    "OK",
+                    serde_json::json!({ "status": "ok", "statements_executed": count }),
+                ),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        }
     } else if method == "POST" && path == "/v1/sql" {
         let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(body) {
             parsed_json
