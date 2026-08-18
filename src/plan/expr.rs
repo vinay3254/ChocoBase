@@ -34,7 +34,7 @@ pub fn eval_with_context(
             let idx = schema
                 .column_index(&qual)
                 .or_else(|| schema.column_index(column))
-                .ok_or_else(|| PlanError::NoSuchColumn(qual))?;
+                .ok_or(PlanError::NoSuchColumn(qual))?;
             Ok(row[idx].clone())
         }
         Expr::IntLiteral(i) => Ok(Value::Integer(*i)),
