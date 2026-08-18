@@ -1,16 +1,21 @@
 //! HTTP REST Gateway for ChocoBase.
-//! Exposes JSON endpoints for SQL query execution, schema inspection, health checks, and metrics.
+//! Exposes JSON endpoints for SQL query execution, auto-generated table REST CRUD APIs,
+//! authentication (signup/token), schema inspection, health checks, and dashboard.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
-use crate::engine::SharedDatabase;
+use crate::auth::{sign_jwt, verify_jwt, verify_password, ExecutionContext, SessionClaims, DEFAULT_JWT_SECRET};
+use crate::engine::{ExecResult, SharedDatabase};
 use crate::error::Result;
+use crate::types::value::Value;
 
 pub mod dashboard;
+pub mod storage;
 
 pub struct HttpServer {
     shutdown_tx: broadcast::Sender<()>,
@@ -24,6 +29,7 @@ impl HttpServer {
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         let db = Arc::new(db);
+        storage::ensure_storage_tables(&db);
 
         tokio::spawn(async move {
             loop {
@@ -55,7 +61,7 @@ impl HttpServer {
 }
 
 async fn handle_http_connection(mut socket: TcpStream, db: Arc<SharedDatabase>) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 8192];
+    let mut buf = vec![0u8; 16384];
     let n = socket.read(&mut buf).await?;
     if n == 0 {
         return Ok(());
@@ -69,14 +75,45 @@ async fn handle_http_connection(mut socket: TcpStream, db: Arc<SharedDatabase>) 
     };
 
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("GET");
-    let path = parts.next().unwrap_or("/");
+    let method = parts.next().unwrap_or("GET").to_uppercase();
+    let full_path = parts.next().unwrap_or("/").to_string();
+
+    // Parse headers
+    let mut auth_token = None;
+    for line in lines.by_ref() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("authorization") {
+                let v = v.trim();
+                if v.to_lowercase().starts_with("bearer ") {
+                    auth_token = Some(v[7..].trim().to_string());
+                }
+            }
+        }
+    }
+
+    // Determine execution context from Authorization header
+    let exec_ctx = if let Some(token) = auth_token {
+        match verify_jwt(&token, DEFAULT_JWT_SECRET) {
+            Ok(claims) => ExecutionContext::from_claims(&claims),
+            Err(_) => ExecutionContext::anonymous(),
+        }
+    } else {
+        ExecutionContext::admin() // Default to admin for non-token direct API / Studio
+    };
 
     if method == "OPTIONS" {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\n\r\n";
+        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\n\r\n";
         socket.write_all(resp.as_bytes()).await?;
         return Ok(());
     }
+
+    let (path, query_string) = match full_path.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (full_path.as_str(), ""),
+    };
 
     // Extract body after \r\n\r\n
     let body = if let Some(idx) = req_str.find("\r\n\r\n") {
@@ -94,6 +131,32 @@ async fn handle_http_connection(mut socket: TcpStream, db: Arc<SharedDatabase>) 
         socket.write_all(dashboard::DASHBOARD_HTML.as_bytes()).await?;
         socket.flush().await?;
         return Ok(());
+    }
+
+    if path.starts_with("/v1/storage/") {
+        let (status_code, status_text, json_body, binary_data) =
+            storage::handle_storage_request(&db, &method, path, query_string, body, &exec_ctx).await;
+
+        if let Some((bytes, content_type)) = binary_data {
+            let header = format!(
+                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            );
+            socket.write_all(header.as_bytes()).await?;
+            socket.write_all(&bytes).await?;
+            socket.flush().await?;
+            return Ok(());
+        } else {
+            let body_bytes = serde_json::to_vec(&json_body).unwrap_or_default();
+            let header = format!(
+                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body_bytes.len()
+            );
+            socket.write_all(header.as_bytes()).await?;
+            socket.write_all(&body_bytes).await?;
+            socket.flush().await?;
+            return Ok(());
+        }
     }
 
     let (status_code, status_text, json_body) = if method == "GET" && path == "/v1/health" {
@@ -120,18 +183,30 @@ async fn handle_http_connection(mut socket: TcpStream, db: Arc<SharedDatabase>) 
         if sql.is_empty() {
             (400, "Bad Request", serde_json::json!({ "error": "missing sql query in request body" }))
         } else {
-            match db.execute(&sql) {
+            match db.execute_with_context(&sql, &exec_ctx) {
                 Ok(result) => (200, "OK", serde_json::json!({ "status": "ok", "result": result })),
                 Err(err) => (400, "Bad Request", serde_json::json!({ "status": "error", "error": err.to_string() })),
             }
         }
+    } else if method == "POST" && path == "/v1/auth/signup" {
+        handle_auth_signup(&db, body).await
+    } else if method == "POST" && path == "/v1/auth/token" {
+        handle_auth_token(&db, body).await
+    } else if method == "POST" && path == "/v1/auth/refresh" {
+        handle_auth_refresh(&db, body).await
+    } else if path.starts_with("/v1/rpc/") {
+        let func_name = &path["/v1/rpc/".len()..];
+        handle_rpc(&db, func_name, body, &exec_ctx).await
+    } else if path.starts_with("/v1/rest/") {
+        let table_name = &path["/v1/rest/".len()..];
+        handle_rest_table_crud(&db, &method, table_name, query_string, body, &exec_ctx).await
     } else {
         (404, "Not Found", serde_json::json!({ "error": format!("endpoint '{}' not found", path) }))
     };
 
     let body_bytes = serde_json::to_vec(&json_body).unwrap_or_default();
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status_code,
         status_text,
         body_bytes.len()
@@ -142,4 +217,427 @@ async fn handle_http_connection(mut socket: TcpStream, db: Arc<SharedDatabase>) 
     socket.flush().await?;
 
     Ok(())
+}
+
+async fn handle_auth_refresh(_db: &SharedDatabase, body: &str) -> (u16, &'static str, serde_json::Value) {
+    let payload: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return (400, "Bad Request", serde_json::json!({ "error": "invalid JSON body" })),
+    };
+
+    let refresh_token = match payload.get("refresh_token").and_then(|r| r.as_str()) {
+        Some(t) => t,
+        None => return (400, "Bad Request", serde_json::json!({ "error": "missing refresh_token" })),
+    };
+
+    match verify_jwt(refresh_token, DEFAULT_JWT_SECRET) {
+        Ok(claims) => {
+            let exp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() + 86400 * 7;
+            let new_claims = SessionClaims::new(claims.sub, &claims.username, &claims.role, exp);
+            let token = sign_jwt(&new_claims, DEFAULT_JWT_SECRET);
+            let refresh = sign_jwt(&new_claims, DEFAULT_JWT_SECRET);
+
+            (200, "OK", serde_json::json!({
+                "access_token": token,
+                "refresh_token": refresh,
+                "token_type": "bearer",
+                "expires_in": 86400 * 7,
+                "user": {
+                    "id": claims.sub,
+                    "username": claims.username,
+                    "role": claims.role,
+                }
+            }))
+        }
+        Err(_) => (401, "Unauthorized", serde_json::json!({ "error": "invalid or expired refresh token" })),
+    }
+}
+
+async fn handle_rpc(
+    db: &SharedDatabase,
+    func_name: &str,
+    body: &str,
+    ctx: &ExecutionContext,
+) -> (u16, &'static str, serde_json::Value) {
+    let payload: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    match func_name {
+        "version" => (200, "OK", serde_json::json!({ "version": "0.1.0", "engine": "ChocoBase" })),
+        "current_user" => (200, "OK", serde_json::json!({ "user_id": ctx.user_id, "role": ctx.role })),
+        "echo" => (200, "OK", payload),
+        _ => {
+            // Check if there's a stored SQL statement / function
+            let sql = format!("SELECT * FROM {func_name}()");
+            match db.execute_with_context(&sql, ctx) {
+                Ok(res) => (200, "OK", serde_json::json!({ "result": res })),
+                Err(e) => (404, "Not Found", serde_json::json!({ "error": format!("function '{func_name}' not found: {e}") })),
+            }
+        }
+    }
+}
+
+async fn handle_auth_signup(db: &SharedDatabase, body: &str) -> (u16, &'static str, serde_json::Value) {
+    let payload: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return (400, "Bad Request", serde_json::json!({ "error": "invalid JSON body" })),
+    };
+
+    let username = match payload.get("username").and_then(|u| u.as_str()) {
+        Some(u) => u,
+        None => return (400, "Bad Request", serde_json::json!({ "error": "missing username field" })),
+    };
+
+    let password = match payload.get("password").and_then(|p| p.as_str()) {
+        Some(p) => p,
+        None => return (400, "Bad Request", serde_json::json!({ "error": "missing password field" })),
+    };
+
+    if let Some(r) = payload.get("role").and_then(|r| r.as_str()) {
+        if r.eq_ignore_ascii_case("admin") || r.eq_ignore_ascii_case("service_role") {
+            return (400, "Bad Request", serde_json::json!({ "error": "cannot request administrative role during public signup" }));
+        }
+    }
+    let role = "user";
+
+    let sql = format!("CREATE USER {username} WITH PASSWORD '{password}' ROLE '{role}'");
+    match db.execute_with_context(&sql, &ExecutionContext::admin()) {
+        Ok(_) => {
+            // Lookup created user ID
+            let select_sql = format!("SELECT id, role FROM _users WHERE username = '{username}'");
+            let user_id = if let Ok(ExecResult::Rows { rows, .. }) = db.execute_with_context(&select_sql, &ExecutionContext::admin()) {
+                if let Some(row) = rows.first() {
+                    match &row[0] {
+                        Value::Integer(id) => *id,
+                        _ => 1,
+                    }
+                } else {
+                    1
+                }
+            } else {
+                1
+            };
+
+            let exp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() + 86400 * 7;
+            let claims = SessionClaims::new(user_id, username, role, exp);
+            let token = sign_jwt(&claims, DEFAULT_JWT_SECRET);
+            let refresh = sign_jwt(&claims, DEFAULT_JWT_SECRET);
+
+            (201, "Created", serde_json::json!({
+                "status": "ok",
+                "access_token": token,
+                "refresh_token": refresh,
+                "token_type": "bearer",
+                "user": {
+                    "id": user_id,
+                    "username": username,
+                    "role": role,
+                }
+            }))
+        }
+        Err(e) => (400, "Bad Request", serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+async fn handle_auth_token(db: &SharedDatabase, body: &str) -> (u16, &'static str, serde_json::Value) {
+    let payload: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return (400, "Bad Request", serde_json::json!({ "error": "invalid JSON body" })),
+    };
+
+    let username = match payload.get("username").and_then(|u| u.as_str()) {
+        Some(u) => u,
+        None => return (400, "Bad Request", serde_json::json!({ "error": "missing username field" })),
+    };
+
+    let password = match payload.get("password").and_then(|p| p.as_str()) {
+        Some(p) => p,
+        None => return (400, "Bad Request", serde_json::json!({ "error": "missing password field" })),
+    };
+
+    let sql = format!("SELECT id, password_hash, role FROM _users WHERE username = '{username}'");
+    match db.execute_with_context(&sql, &ExecutionContext::admin()) {
+        Ok(ExecResult::Rows { rows, .. }) => {
+            if let Some(row) = rows.first() {
+                let user_id = match &row[0] {
+                    Value::Integer(id) => *id,
+                    _ => 0,
+                };
+                let hash = match &row[1] {
+                    Value::Text(h) => h.as_str(),
+                    _ => "",
+                };
+                let role = match &row[2] {
+                    Value::Text(r) => r.as_str(),
+                    _ => "user",
+                };
+
+                if verify_password(password, hash) {
+                    let exp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() + 86400 * 7;
+                    let claims = SessionClaims::new(user_id, username, role, exp);
+                    let token = sign_jwt(&claims, DEFAULT_JWT_SECRET);
+                    let refresh = sign_jwt(&claims, DEFAULT_JWT_SECRET);
+
+                    (200, "OK", serde_json::json!({
+                        "access_token": token,
+                        "refresh_token": refresh,
+                        "token_type": "bearer",
+                        "user": {
+                            "id": user_id,
+                            "username": username,
+                            "role": role,
+                        }
+                    }))
+                } else {
+                    (401, "Unauthorized", serde_json::json!({ "error": "invalid credentials" }))
+                }
+            } else {
+                (401, "Unauthorized", serde_json::json!({ "error": "user not found" }))
+            }
+        }
+        _ => (401, "Unauthorized", serde_json::json!({ "error": "authentication failed" })),
+    }
+}
+
+async fn handle_rest_table_crud(
+    db: &SharedDatabase,
+    method: &str,
+    table: &str,
+    query_str: &str,
+    body: &str,
+    ctx: &ExecutionContext,
+) -> (u16, &'static str, serde_json::Value) {
+    let schema = match db.table_schema(table) {
+        Some(s) => s,
+        None => return (404, "Not Found", serde_json::json!({ "error": format!("table '{table}' not found") })),
+    };
+
+    let query_params = parse_query_params(query_str);
+
+    match method {
+        "GET" => {
+            let select_cols = query_params.get("select").map(|s| s.as_str()).unwrap_or("*");
+            let mut sql = format!("SELECT {select_cols} FROM {table}");
+            let where_clauses = build_where_clauses(&query_params);
+            if !where_clauses.is_empty() {
+                sql.push_str(&format!(" WHERE {}", where_clauses.join(" AND ")));
+            }
+
+            if let Some(order) = query_params.get("order") {
+                if let Some((col, dir)) = order.split_once('.') {
+                    let dir_sql = if dir.eq_ignore_ascii_case("desc") { "DESC" } else { "ASC" };
+                    sql.push_str(&format!(" ORDER BY {col} {dir_sql}"));
+                } else {
+                    sql.push_str(&format!(" ORDER BY {order} ASC"));
+                }
+            }
+
+            if let Some(limit_str) = query_params.get("limit") {
+                if let Ok(limit) = limit_str.parse::<i64>() {
+                    sql.push_str(&format!(" LIMIT {limit}"));
+                }
+            }
+
+            match db.execute_with_context(&sql, ctx) {
+                Ok(ExecResult::Rows { columns, rows }) => {
+                    let json_rows: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|row| {
+                            let mut map = serde_json::Map::new();
+                            for (idx, col_name) in columns.iter().enumerate() {
+                                map.insert(col_name.clone(), value_to_json(&row[idx]));
+                            }
+                            serde_json::Value::Object(map)
+                        })
+                        .collect();
+                    (200, "OK", serde_json::Value::Array(json_rows))
+                }
+                Ok(_) => (200, "OK", serde_json::json!([])),
+                Err(e) => (400, "Bad Request", serde_json::json!({ "error": e.to_string() })),
+            }
+        }
+        "POST" => {
+            let json_body: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => return (400, "Bad Request", serde_json::json!({ "error": "invalid JSON body" })),
+            };
+
+            let rows_to_insert = match json_body {
+                serde_json::Value::Array(arr) => arr,
+                obj @ serde_json::Value::Object(_) => vec![obj],
+                _ => return (400, "Bad Request", serde_json::json!({ "error": "body must be JSON object or array" })),
+            };
+
+            let mut inserted_count = 0;
+            for row_val in rows_to_insert {
+                let obj = match row_val.as_object() {
+                    Some(o) => o,
+                    None => continue,
+                };
+
+                let mut col_names = Vec::new();
+                let mut col_values = Vec::new();
+
+                for col in &schema.columns {
+                    if let Some(val) = obj.get(&col.name) {
+                        col_names.push(col.name.clone());
+                        col_values.push(json_to_sql_literal(val));
+                    }
+                }
+
+                if col_names.is_empty() {
+                    continue;
+                }
+
+                let sql = format!(
+                    "INSERT INTO {table} ({}) VALUES ({})",
+                    col_names.join(", "),
+                    col_values.join(", ")
+                );
+
+                match db.execute_with_context(&sql, ctx) {
+                    Ok(ExecResult::Modified(n)) => inserted_count += n,
+                    Ok(_) => inserted_count += 1,
+                    Err(e) => return (400, "Bad Request", serde_json::json!({ "error": e.to_string() })),
+                }
+            }
+
+            (201, "Created", serde_json::json!({ "status": "ok", "inserted": inserted_count }))
+        }
+        "PATCH" => {
+            let json_body: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => return (400, "Bad Request", serde_json::json!({ "error": "invalid JSON body" })),
+            };
+
+            let obj = match json_body.as_object() {
+                Some(o) => o,
+                None => return (400, "Bad Request", serde_json::json!({ "error": "body must be JSON object" })),
+            };
+
+            let mut assignments = Vec::new();
+            for (k, v) in obj {
+                assignments.push(format!("{k} = {}", json_to_sql_literal(v)));
+            }
+
+            if assignments.is_empty() {
+                return (400, "Bad Request", serde_json::json!({ "error": "no fields provided to update" }));
+            }
+
+            let mut sql = format!("UPDATE {table} SET {}", assignments.join(", "));
+            let where_clauses = build_where_clauses(&query_params);
+            if !where_clauses.is_empty() {
+                sql.push_str(&format!(" WHERE {}", where_clauses.join(" AND ")));
+            }
+
+            match db.execute_with_context(&sql, ctx) {
+                Ok(ExecResult::Modified(n)) => (200, "OK", serde_json::json!({ "status": "ok", "modified": n })),
+                Ok(_) => (200, "OK", serde_json::json!({ "status": "ok", "modified": 0 })),
+                Err(e) => (400, "Bad Request", serde_json::json!({ "error": e.to_string() })),
+            }
+        }
+        "DELETE" => {
+            let mut sql = format!("DELETE FROM {table}");
+            let where_clauses = build_where_clauses(&query_params);
+            if !where_clauses.is_empty() {
+                sql.push_str(&format!(" WHERE {}", where_clauses.join(" AND ")));
+            }
+
+            match db.execute_with_context(&sql, ctx) {
+                Ok(ExecResult::Modified(n)) => (200, "OK", serde_json::json!({ "status": "ok", "deleted": n })),
+                Ok(_) => (200, "OK", serde_json::json!({ "status": "ok", "deleted": 0 })),
+                Err(e) => (400, "Bad Request", serde_json::json!({ "error": e.to_string() })),
+            }
+        }
+        _ => (405, "Method Not Allowed", serde_json::json!({ "error": format!("method '{method}' not allowed") })),
+    }
+}
+
+fn parse_query_params(query: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = pair.split_once('=') {
+            map.insert(k.to_string(), v.to_string());
+        }
+    }
+    map
+}
+
+fn build_where_clauses(params: &HashMap<String, String>) -> Vec<String> {
+    let mut clauses = Vec::new();
+    for (key, val) in params {
+        if key == "order" || key == "limit" || key == "offset" || key == "select" {
+            continue;
+        }
+        if let Some((op, rhs)) = val.split_once('.') {
+            match op {
+                "eq" => clauses.push(format!("{key} = {}", format_sql_val(rhs))),
+                "neq" => clauses.push(format!("{key} != {}", format_sql_val(rhs))),
+                "gt" => clauses.push(format!("{key} > {}", format_sql_val(rhs))),
+                "gte" => clauses.push(format!("{key} >= {}", format_sql_val(rhs))),
+                "lt" => clauses.push(format!("{key} < {}", format_sql_val(rhs))),
+                "lte" => clauses.push(format!("{key} <= {}", format_sql_val(rhs))),
+                "like" | "ilike" => clauses.push(format!("{key} LIKE '{}'", rhs.replace('\'', "''"))),
+                "is" => {
+                    if rhs.eq_ignore_ascii_case("null") {
+                        clauses.push(format!("{key} IS NULL"));
+                    } else if rhs.eq_ignore_ascii_case("not_null") || rhs.eq_ignore_ascii_case("not.null") {
+                        clauses.push(format!("{key} IS NOT NULL"));
+                    }
+                }
+                "in" => {
+                    let cleaned = rhs.trim_start_matches('(').trim_end_matches(')');
+                    let elements: Vec<String> = cleaned.split(',').map(|item| format_sql_val(item.trim())).collect();
+                    clauses.push(format!("{key} IN ({})", elements.join(", ")));
+                }
+                _ => clauses.push(format!("{key} = {}", format_sql_val(rhs))),
+            }
+        } else {
+            clauses.push(format!("{key} = {}", format_sql_val(val)));
+        }
+    }
+    clauses
+}
+
+fn format_sql_val(s: &str) -> String {
+    if let Ok(i) = s.parse::<i64>() {
+        i.to_string()
+    } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
+        s.to_uppercase()
+    } else {
+        format!("'{}'", s.replace('\'', "''"))
+    }
+}
+
+fn value_to_json(val: &Value) -> serde_json::Value {
+    match val {
+        Value::Integer(i) => serde_json::json!(i),
+        Value::Text(s) => serde_json::json!(s),
+        Value::Boolean(b) => serde_json::json!(b),
+        Value::Json(j) => serde_json::from_str(j).unwrap_or_else(|_| serde_json::json!(j)),
+        Value::Null => serde_json::Value::Null,
+    }
+}
+
+fn json_to_sql_literal(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            let serialized = serde_json::to_string(val).unwrap_or_default();
+            format!("'{}'", serialized.replace('\'', "''"))
+        }
+    }
 }
