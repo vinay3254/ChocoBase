@@ -261,9 +261,21 @@ impl Parser {
             let ty_offset = self.peek_offset();
             let ty = match self.advance() {
                 Token::KwInteger => ColumnType::Integer,
+                Token::KwFloat => ColumnType::Float,
                 Token::KwText => ColumnType::Text,
                 Token::KwBoolean => ColumnType::Boolean,
                 Token::KwJson => ColumnType::Json,
+                Token::KwVector => {
+                    let mut dim = 1536;
+                    if matches!(self.peek(), Token::LParen) {
+                        self.advance();
+                        if let Token::IntLiteral(n) = self.advance() {
+                            dim = n as usize;
+                        }
+                        self.expect(&Token::RParen)?;
+                    }
+                    ColumnType::Vector(dim)
+                }
                 other => {
                     return Err(ParseError::Syntax {
                         offset: ty_offset,
@@ -334,10 +346,29 @@ impl Parser {
         let offset = self.peek_offset();
         let mut expr = match self.advance() {
             Token::IntLiteral(n) => Expr::IntLiteral(n),
+            Token::FloatLiteral(f) => Expr::FloatLiteral(f),
             Token::StringLiteral(s) => Expr::StringLiteral(s),
             Token::True => Expr::BoolLiteral(true),
             Token::False => Expr::BoolLiteral(false),
             Token::Null => Expr::Null,
+            Token::CosineDistance | Token::L2Distance | Token::InnerProduct => {
+                let metric = match self.tokens[self.pos - 1].token {
+                    Token::CosineDistance => crate::sql::ast::VectorMetric::Cosine,
+                    Token::L2Distance => crate::sql::ast::VectorMetric::L2,
+                    Token::InnerProduct => crate::sql::ast::VectorMetric::InnerProduct,
+                    _ => unreachable!(),
+                };
+                self.expect(&Token::LParen)?;
+                let left = self.parse_where_expr()?;
+                self.expect(&Token::Comma)?;
+                let right = self.parse_where_expr()?;
+                self.expect(&Token::RParen)?;
+                Expr::VectorDistance {
+                    metric,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
+            }
             Token::Count => {
                 self.expect(&Token::LParen)?;
                 if matches!(self.peek(), Token::Star) {
