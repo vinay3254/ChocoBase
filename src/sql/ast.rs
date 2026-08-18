@@ -173,6 +173,14 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    FtsMatch {
+        expr: Box<Expr>,
+        query: String,
+    },
+    FtsRank {
+        expr: Box<Expr>,
+        query: String,
+    },
     AuthUid,
 }
 
