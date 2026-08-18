@@ -369,6 +369,36 @@ impl Parser {
                     right: Box::new(right),
                 }
             }
+            Token::FtsMatch | Token::FtsRank => {
+                let is_match = matches!(self.tokens[self.pos - 1].token, Token::FtsMatch);
+                self.expect(&Token::LParen)?;
+                let expr = self.parse_where_expr()?;
+                self.expect(&Token::Comma)?;
+                let q_offset = self.peek_offset();
+                let query = match self.advance() {
+                    Token::StringLiteral(s) => s,
+                    other => {
+                        return Err(ParseError::Syntax {
+                            offset: q_offset,
+                            message: format!(
+                                "expected string query in text search, found {other:?}"
+                            ),
+                        })
+                    }
+                };
+                self.expect(&Token::RParen)?;
+                if is_match {
+                    Expr::FtsMatch {
+                        expr: Box::new(expr),
+                        query,
+                    }
+                } else {
+                    Expr::FtsRank {
+                        expr: Box::new(expr),
+                        query,
+                    }
+                }
+            }
             Token::Exists => {
                 self.expect(&Token::LParen)?;
                 let subquery = self.parse_select()?;
