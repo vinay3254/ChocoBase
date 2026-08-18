@@ -235,20 +235,103 @@ impl Parser {
         self.expect(&Token::Alter)?;
         self.expect(&Token::Table)?;
         let table = self.expect_identifier()?;
-        let enabled = match self.advance() {
-            Token::Enable => true,
-            Token::Disable => false,
-            other => {
-                return Err(ParseError::Syntax {
-                    offset: self.peek_offset(),
-                    message: format!("expected ENABLE or DISABLE, found {other:?}"),
+        match self.advance() {
+            Token::Enable => {
+                self.expect(&Token::Row)?;
+                self.expect(&Token::Level)?;
+                self.expect(&Token::Security)?;
+                Ok(Statement::AlterTableRls {
+                    table,
+                    enabled: true,
                 })
             }
-        };
-        self.expect(&Token::Row)?;
-        self.expect(&Token::Level)?;
-        self.expect(&Token::Security)?;
-        Ok(Statement::AlterTableRls { table, enabled })
+            Token::Disable => {
+                self.expect(&Token::Row)?;
+                self.expect(&Token::Level)?;
+                self.expect(&Token::Security)?;
+                Ok(Statement::AlterTableRls {
+                    table,
+                    enabled: false,
+                })
+            }
+            Token::Add => {
+                if matches!(self.peek(), Token::Column) {
+                    self.advance();
+                }
+                let cname = self.expect_identifier()?;
+                let ty_offset = self.peek_offset();
+                let ty = match self.advance() {
+                    Token::KwInteger => ColumnType::Integer,
+                    Token::KwFloat => ColumnType::Float,
+                    Token::KwText => ColumnType::Text,
+                    Token::KwBoolean => ColumnType::Boolean,
+                    Token::KwJson => ColumnType::Json,
+                    Token::KwVector => {
+                        let mut dim = 1536;
+                        if matches!(self.peek(), Token::LParen) {
+                            self.advance();
+                            if let Token::IntLiteral(n) = self.advance() {
+                                dim = n as usize;
+                            }
+                            self.expect(&Token::RParen)?;
+                        }
+                        ColumnType::Vector(dim)
+                    }
+                    other => {
+                        return Err(ParseError::Syntax {
+                            offset: ty_offset,
+                            message: format!("expected column type, found {other:?}"),
+                        });
+                    }
+                };
+
+                let mut not_null = false;
+                let mut primary_key = false;
+
+                while matches!(self.peek(), Token::Not | Token::Primary) {
+                    if matches!(self.peek(), Token::Not) {
+                        self.advance();
+                        self.expect(&Token::Null)?;
+                        not_null = true;
+                    } else if matches!(self.peek(), Token::Primary) {
+                        self.advance();
+                        self.expect(&Token::Key)?;
+                        primary_key = true;
+                    }
+                }
+
+                Ok(Statement::AlterTableAddColumn {
+                    table,
+                    column: crate::sql::ast::ColumnDef {
+                        name: cname,
+                        ty,
+                        not_null,
+                        primary_key,
+                    },
+                })
+            }
+            Token::Drop => {
+                if matches!(self.peek(), Token::Column) {
+                    self.advance();
+                }
+                let cname = self.expect_identifier()?;
+                Ok(Statement::AlterTableDropColumn {
+                    table,
+                    column: cname,
+                })
+            }
+            Token::Rename => {
+                self.expect(&Token::To)?;
+                let new_name = self.expect_identifier()?;
+                Ok(Statement::AlterTableRename { table, new_name })
+            }
+            other => Err(ParseError::Syntax {
+                offset: self.peek_offset(),
+                message: format!(
+                    "expected ENABLE, DISABLE, ADD, DROP, or RENAME after ALTER TABLE, found {other:?}"
+                ),
+            }),
+        }
     }
 
     fn parse_create_table(&mut self) -> Result<Statement, ParseError> {
