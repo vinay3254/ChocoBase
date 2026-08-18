@@ -203,10 +203,7 @@ pub fn recover_if_needed(db_path: &Path) -> Result<(), StorageError> {
         Err(e) => return Err(StorageError::Io(e)),
     };
 
-    let header = match JournalHeader::read_from(&mut jnl_file) {
-        Ok(h) => h,
-        Err(e) => return Err(e),
-    };
+    let header = JournalHeader::read_from(&mut jnl_file)?;
 
     let mut db_file = OpenOptions::new().read(true).write(true).open(db_path)?;
 
@@ -284,6 +281,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&jnl_path)
             .unwrap();
 
@@ -313,7 +311,7 @@ mod tests {
         drop(jnl_file);
 
         // Mutate db_file to simulate corrupted/modified state
-        db_file.seek(SeekFrom::Start(1 * PAGE_SIZE as u64)).unwrap();
+        db_file.seek(SeekFrom::Start(PAGE_SIZE as u64)).unwrap();
         db_file.write_all(&[99u8; PAGE_SIZE]).unwrap();
         db_file.seek(SeekFrom::Start(2 * PAGE_SIZE as u64)).unwrap();
         db_file.write_all(&[88u8; PAGE_SIZE]).unwrap();
@@ -326,9 +324,7 @@ mod tests {
         // 5. Verify pre-images for page 1 and page 2 were restored
         let mut restored_db = File::open(db_path).unwrap();
         let mut buf1 = [0u8; PAGE_SIZE];
-        restored_db
-            .seek(SeekFrom::Start(1 * PAGE_SIZE as u64))
-            .unwrap();
+        restored_db.seek(SeekFrom::Start(PAGE_SIZE as u64)).unwrap();
         restored_db.read_exact(&mut buf1).unwrap();
         assert_eq!(buf1, page1);
 
