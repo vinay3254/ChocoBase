@@ -10,8 +10,12 @@ pub mod engine;
 pub mod repl;
 pub mod server;
 pub mod http;
+pub mod auth;
+pub mod migration;
 
 pub use error::{DbError, Result};
 pub use engine::{Database, ExecResult, SharedDatabase};
 pub use server::{Server, ServerConfig};
 pub use http::HttpServer;
+pub use auth::{ExecutionContext, SessionClaims};
+pub use migration::{Migration, MigrationRunner, AppliedMigration};
