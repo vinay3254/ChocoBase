@@ -67,6 +67,7 @@ pub enum Token {
     Explain,
     In,
     Like,
+    Returning,
     Identifier(String),
     IntLiteral(i64),
     StringLiteral(String),
