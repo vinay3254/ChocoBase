@@ -1136,9 +1136,11 @@ fn format_sql_val(s: &str) -> String {
 fn value_to_json(val: &Value) -> serde_json::Value {
     match val {
         Value::Integer(i) => serde_json::json!(i),
+        Value::Float(f) => serde_json::json!(f),
         Value::Text(s) => serde_json::json!(s),
         Value::Boolean(b) => serde_json::json!(b),
         Value::Json(j) => serde_json::from_str(j).unwrap_or_else(|_| serde_json::json!(j)),
+        Value::Vector(v) => serde_json::json!(v),
         Value::Null => serde_json::Value::Null,
     }
 }
