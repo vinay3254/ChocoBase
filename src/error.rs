@@ -102,4 +102,26 @@ pub enum DbError {
     Io(#[from] std::io::Error),
 }
 
+impl DbError {
+    /// Returns the standard 5-character PostgreSQL SQLSTATE error code for this error.
+    pub fn sqlstate(&self) -> &'static str {
+        match self {
+            DbError::Parse(ParseError::Syntax { .. }) => "42601", // syntax_error
+            DbError::Plan(PlanError::NoSuchTable(_)) => "42P01",  // undefined_table
+            DbError::Plan(PlanError::NoSuchColumn(_)) => "42703", // undefined_column
+            DbError::Plan(PlanError::TableAlreadyExists(_)) => "42P07", // duplicate_table
+            DbError::Plan(PlanError::IndexAlreadyExists(_)) => "42P07", // duplicate_table
+            DbError::Plan(PlanError::CannotUpdatePrimaryKey) => "0A000", // feature_not_supported
+            DbError::Exec(ExecError::NotNullViolation(_)) => "23502", // not_null_violation
+            DbError::Exec(ExecError::DuplicatePrimaryKey) => "23505", // unique_violation
+            DbError::BTree(BTreeError::DuplicateKey) => "23505",  // unique_violation
+            DbError::Exec(ExecError::BTree(BTreeError::DuplicateKey)) => "23505", // unique_violation
+            DbError::Exec(ExecError::InvalidValue(_)) => "22000",                 // data_exception
+            DbError::Storage(StorageError::DatabaseLocked(_)) => "55P03", // lock_not_available
+            DbError::Exec(ExecError::Storage(StorageError::DatabaseLocked(_))) => "55P03",
+            _ => "XX000", // internal_error
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, DbError>;
