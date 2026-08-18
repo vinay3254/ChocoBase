@@ -2,7 +2,7 @@ use crate::types::schema::TableSchema;
 use crate::types::value::{ColumnType, Value};
 
 pub fn encode_row(schema: &TableSchema, values: &[Value]) -> Vec<u8> {
-    let bitmap_len = (schema.columns.len() + 7) / 8;
+    let bitmap_len = schema.columns.len().div_ceil(8);
     let mut bitmap = vec![0u8; bitmap_len];
     for (i, v) in values.iter().enumerate() {
         if matches!(v, Value::Null) {
@@ -32,7 +32,7 @@ pub fn encode_row(schema: &TableSchema, values: &[Value]) -> Vec<u8> {
 }
 
 pub fn decode_row(schema: &TableSchema, data: &[u8]) -> Vec<Value> {
-    let bitmap_len = (schema.columns.len() + 7) / 8;
+    let bitmap_len = schema.columns.len().div_ceil(8);
     let bitmap = &data[0..bitmap_len];
     let mut pos = bitmap_len;
     let mut values = Vec::with_capacity(schema.columns.len());
