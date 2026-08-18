@@ -54,11 +54,13 @@ fn test_user_creation_in_database() {
         .execute("SELECT id, username, role FROM _users ORDER BY id ASC")
         .unwrap();
     if let ExecResult::Rows { rows, .. } = rows {
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0][1], Value::Text("alice".into()));
-        assert_eq!(rows[0][2], Value::Text("member".into()));
-        assert_eq!(rows[1][1], Value::Text("bob".into()));
-        assert_eq!(rows[1][2], Value::Text("user".into()));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0][1], Value::Text("postgres".into()));
+        assert_eq!(rows[0][2], Value::Text("admin".into()));
+        assert_eq!(rows[1][1], Value::Text("alice".into()));
+        assert_eq!(rows[1][2], Value::Text("member".into()));
+        assert_eq!(rows[2][1], Value::Text("bob".into()));
+        assert_eq!(rows[2][2], Value::Text("user".into()));
     } else {
         panic!("expected rows");
     }
