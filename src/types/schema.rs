@@ -13,6 +13,8 @@ pub struct TableSchema {
     pub name: String,
     pub columns: Vec<Column>,
     pub root_page: u32,
+    #[serde(default)]
+    pub rls_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -21,6 +23,24 @@ pub struct IndexSchema {
     pub table: String,
     pub column: String,
     pub root_page: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum PolicyCmd {
+    Select,
+    Insert,
+    Update,
+    Delete,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PolicySchema {
+    pub name: String,
+    pub table: String,
+    pub cmd: PolicyCmd,
+    pub using_expr: Option<crate::sql::ast::Expr>,
+    pub with_check: Option<crate::sql::ast::Expr>,
 }
 
 impl TableSchema {
@@ -48,6 +68,7 @@ mod tests {
                 Column { name: "name".into(), ty: ColumnType::Text, not_null: false, is_primary_key: false },
             ],
             root_page: 2,
+            rls_enabled: false,
         }
     }
 
