@@ -3,6 +3,7 @@
 pub mod protocol;
 pub mod session;
 pub mod listener;
+pub mod postgres_wire;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,11 @@ impl Server {
         })
     }
 
+    /// Returns a cloned SharedDatabase handle sharing the same storage and lock manager.
+    pub fn db(&self) -> SharedDatabase {
+        self.db.clone()
+    }
+
     /// Binds the listener immediately, spawns the server task in the background,
     /// and returns the running server handle and bound local socket address.
     pub async fn bind(config: ServerConfig) -> Result<(Self, SocketAddr)> {
@@ -87,10 +93,6 @@ impl Server {
             },
             local_addr,
         ))
-    }
-
-    pub fn db(&self) -> &SharedDatabase {
-        &self.db
     }
 
     /// Runs the server loop in the current task until shutdown.
