@@ -9,6 +9,14 @@ pub fn eval(expr: &Expr, schema: &TableSchema, row: &[Value]) -> Result<Value, P
             let idx = schema.column_index(name).ok_or_else(|| PlanError::NoSuchColumn(name.clone()))?;
             Ok(row[idx].clone())
         }
+        Expr::QualifiedColumn { table, column } => {
+            let qual = format!("{table}.{column}");
+            let idx = schema
+                .column_index(&qual)
+                .or_else(|| schema.column_index(column))
+                .ok_or_else(|| PlanError::NoSuchColumn(qual))?;
+            Ok(row[idx].clone())
+        }
         Expr::IntLiteral(i) => Ok(Value::Integer(*i)),
         Expr::StringLiteral(s) => Ok(Value::Text(s.clone())),
         Expr::BoolLiteral(b) => Ok(Value::Boolean(*b)),
@@ -22,6 +30,73 @@ pub fn eval(expr: &Expr, schema: &TableSchema, row: &[Value]) -> Result<Value, P
             let l = eval(left, schema, row)?;
             let r = eval(right, schema, row)?;
             Ok(eval_binop(*op, &l, &r))
+        }
+        Expr::Aggregate(_) => Err(PlanError::InvalidExpression(
+            "aggregate functions cannot be evaluated directly in row context".into(),
+        )),
+        Expr::JsonExtract { expr, path, as_text } => {
+            let val = eval(expr, schema, row)?;
+            let json_str = match &val {
+                Value::Json(s) | Value::Text(s) => s.as_str(),
+                Value::Null => return Ok(Value::Null),
+                _ => return Ok(Value::Null),
+            };
+
+            let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+                Ok(v) => v,
+                Err(_) => return Ok(Value::Null),
+            };
+
+            let normalized_path = path.strip_prefix("$.").unwrap_or(path.strip_prefix('$').unwrap_or(path.as_str()));
+            let mut current = &parsed;
+            if !normalized_path.is_empty() {
+                for segment in normalized_path.split('.') {
+                    match current {
+                        serde_json::Value::Object(map) => {
+                            if let Some(next) = map.get(segment) {
+                                current = next;
+                            } else {
+                                return Ok(Value::Null);
+                            }
+                        }
+                        serde_json::Value::Array(arr) => {
+                            if let Ok(idx) = segment.parse::<usize>() {
+                                if let Some(next) = arr.get(idx) {
+                                    current = next;
+                                } else {
+                                    return Ok(Value::Null);
+                                }
+                            } else {
+                                return Ok(Value::Null);
+                            }
+                        }
+                        _ => return Ok(Value::Null),
+                    }
+                }
+            }
+
+            match current {
+                serde_json::Value::Null => Ok(Value::Null),
+                serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        Ok(Value::Integer(i))
+                    } else if *as_text {
+                        Ok(Value::Text(n.to_string()))
+                    } else {
+                        Ok(Value::Json(n.to_string()))
+                    }
+                }
+                serde_json::Value::String(s) => Ok(Value::Text(s.clone())),
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                    let serialized = serde_json::to_string(current).unwrap_or_default();
+                    if *as_text {
+                        Ok(Value::Text(serialized))
+                    } else {
+                        Ok(Value::Json(serialized))
+                    }
+                }
+            }
         }
     }
 }

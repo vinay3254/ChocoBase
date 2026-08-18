@@ -10,7 +10,10 @@ pub enum Statement {
     Select {
         columns: SelectColumns,
         table: String,
+        table_ref: Option<TableRef>,
         where_clause: Option<Expr>,
+        group_by: Option<Vec<Expr>>,
+        having: Option<Expr>,
         order_by: Option<(String, bool)>,
         limit: Option<i64>,
     },
@@ -25,6 +28,32 @@ pub enum Statement {
 pub enum SelectColumns {
     All,
     List(Vec<String>),
+    Items(Vec<SelectItem>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectItem {
+    All,
+    Expr { expr: Expr, alias: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableRef {
+    Table { name: String, alias: Option<String> },
+    Join {
+        left: Box<TableRef>,
+        right: Box<TableRef>,
+        join_type: JoinType,
+        condition: Option<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+    Cross,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,12 +67,25 @@ pub struct ColumnDef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Column(String),
+    QualifiedColumn { table: String, column: String },
     IntLiteral(i64),
     StringLiteral(String),
     BoolLiteral(bool),
     Null,
     BinaryOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     IsNull { expr: Box<Expr>, negated: bool },
+    Aggregate(AggregateFunc),
+    JsonExtract { expr: Box<Expr>, path: String, as_text: bool },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateFunc {
+    CountStar,
+    Count(Box<Expr>),
+    Sum(Box<Expr>),
+    Avg(Box<Expr>),
+    Min(Box<Expr>),
+    Max(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

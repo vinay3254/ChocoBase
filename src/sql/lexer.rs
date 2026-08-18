@@ -22,6 +22,7 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
             ')' => { chars.next(); tokens.push(SpannedToken { token: Token::RParen, offset: start }); }
             ',' => { chars.next(); tokens.push(SpannedToken { token: Token::Comma, offset: start }); }
             '*' => { chars.next(); tokens.push(SpannedToken { token: Token::Star, offset: start }); }
+            '.' => { chars.next(); tokens.push(SpannedToken { token: Token::Dot, offset: start }); }
             ';' => { chars.next(); tokens.push(SpannedToken { token: Token::Semicolon, offset: start }); }
             '=' => { chars.next(); tokens.push(SpannedToken { token: Token::Eq, offset: start }); }
             '<' => {
@@ -46,6 +47,21 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                         tokens.push(SpannedToken { token: Token::GtEq, offset: start });
                     }
                     _ => tokens.push(SpannedToken { token: Token::Gt, offset: start }),
+                }
+            }
+            '-' => {
+                chars.next();
+                match chars.peek() {
+                    Some(&(_, '>')) => {
+                        chars.next();
+                        if let Some(&(_, '>')) = chars.peek() {
+                            chars.next();
+                            tokens.push(SpannedToken { token: Token::ArrowText, offset: start });
+                        } else {
+                            tokens.push(SpannedToken { token: Token::Arrow, offset: start });
+                        }
+                    }
+                    _ => return Err(ParseError::Syntax { offset: start, message: "unexpected '-'".into() }),
                 }
             }
             '!' => {
@@ -152,9 +168,24 @@ fn keyword_or_identifier(text: &str) -> Token {
         "COMMIT" => Token::Commit,
         "ROLLBACK" => Token::Rollback,
         "TRANSACTION" => Token::Transaction,
+        "JOIN" => Token::Join,
+        "INNER" => Token::Inner,
+        "LEFT" => Token::Left,
+        "RIGHT" => Token::Right,
+        "CROSS" => Token::Cross,
+        "GROUP" => Token::Group,
+        "HAVING" => Token::Having,
+        "AS" => Token::As,
+        "COUNT" => Token::Count,
+        "SUM" => Token::Sum,
+        "AVG" => Token::Avg,
+        "MIN" => Token::Min,
+        "MAX" => Token::Max,
         "INTEGER" => Token::KwInteger,
         "TEXT" => Token::KwText,
         "BOOLEAN" => Token::KwBoolean,
+        "JSON" => Token::KwJson,
+        "JSON_EXTRACT" => Token::JsonExtract,
         "TRUE" => Token::True,
         "FALSE" => Token::False,
         _ => Token::Identifier(text.to_string()),

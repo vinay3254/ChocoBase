@@ -3,13 +3,16 @@ pub enum Token {
     Create, Table, Drop, Index, On, Insert, Into, Values, Select, From, Where,
     Update, Set, Delete, Order, By, Asc, Desc, Limit, Not, Null, Primary, Key,
     And, Or, Is, Begin, Commit, Rollback, Transaction,
-    KwInteger, KwText, KwBoolean,
+    Join, Inner, Left, Right, Cross, Group, Having, As,
+    Count, Sum, Avg, Min, Max, JsonExtract,
+    KwInteger, KwText, KwBoolean, KwJson,
     Identifier(String),
     IntLiteral(i64),
     StringLiteral(String),
     True, False,
     Eq, NotEq, Lt, LtEq, Gt, GtEq,
-    LParen, RParen, Comma, Star, Semicolon,
+    Arrow, ArrowText,
+    LParen, RParen, Comma, Star, Dot, Semicolon,
     Eof,
 }
 

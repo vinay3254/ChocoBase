@@ -43,6 +43,61 @@ pub fn build_select_plan(
     Ok(plan)
 }
 
+pub fn build_table_ref_plan(
+    catalog: &mut crate::catalog::Catalog,
+    pager: &mut crate::storage::pager::Pager,
+    table_ref: &crate::sql::ast::TableRef,
+) -> Result<(Box<dyn Operator>, TableSchema), PlanError> {
+    match table_ref {
+        crate::sql::ast::TableRef::Table { name, alias } => {
+            let base_schema = catalog
+                .get_table(pager, name)
+                .map_err(|e| PlanError::NoSuchTable(e.to_string()))?
+                .ok_or_else(|| PlanError::NoSuchTable(name.clone()))?;
+
+            let prefix = alias.as_deref().unwrap_or(name);
+            let mut cols = Vec::new();
+            for c in &base_schema.columns {
+                let mut qual_col = c.clone();
+                qual_col.name = format!("{prefix}.{}", c.name);
+                cols.push(qual_col);
+            }
+
+            let schema = TableSchema {
+                name: prefix.to_string(),
+                columns: cols,
+                root_page: base_schema.root_page,
+            };
+            let plan: Box<dyn Operator> = Box::new(SeqScan::new(base_schema));
+            Ok((plan, schema))
+        }
+        crate::sql::ast::TableRef::Join { left, right, join_type, condition } => {
+            let (left_plan, left_schema) = build_table_ref_plan(catalog, pager, left)?;
+            let (right_plan, right_schema) = build_table_ref_plan(catalog, pager, right)?;
+
+            let mut combined_cols = left_schema.columns.clone();
+            combined_cols.extend(right_schema.columns.clone());
+
+            let combined_schema = TableSchema {
+                name: format!("{}_join_{}", left_schema.name, right_schema.name),
+                columns: combined_cols,
+                root_page: 0,
+            };
+
+            let join_op = Box::new(crate::exec::join::NestedLoopJoin::new(
+                left_plan,
+                right_plan,
+                right_schema.columns.len(),
+                *join_type,
+                condition.clone(),
+                combined_schema.clone(),
+            ));
+
+            Ok((join_op, combined_schema))
+        }
+    }
+}
+
 fn find_index_equality(where_clause: Option<Expr>, indexes: &[IndexSchema]) -> Option<(IndexSchema, Value, Option<Expr>)> {
     let expr = where_clause?;
     if contains_or(&expr) {
