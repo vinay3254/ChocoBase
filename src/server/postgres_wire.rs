@@ -1,10 +1,12 @@
 //! PostgreSQL Wire Protocol v3 Server Handler for ChocoBase.
 //! Enables standard PostgreSQL clients (psql, Node pg, Python psycopg, ORMs) to connect directly.
 
+use std::collections::HashMap;
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::auth::{verify_password, ExecutionContext};
 use crate::engine::{ExecResult, SharedDatabase};
 use crate::types::value::Value;
 
@@ -16,8 +18,6 @@ pub async fn handle_postgres_session_with_prefix(
     db: SharedDatabase,
     prefix_byte: u8,
 ) -> io::Result<()> {
-    // The listener consumed the first byte of the 4-byte big-endian message length.
-    // Read the remaining 3 bytes and reconstruct the full length prefix.
     let mut rest = [0u8; 3];
     socket.read_exact(&mut rest).await?;
     let len_buf = [prefix_byte, rest[0], rest[1], rest[2]];
@@ -31,6 +31,21 @@ pub async fn handle_postgres_session(
     let mut len_buf = [0u8; 4];
     socket.read_exact(&mut len_buf).await?;
     handle_postgres_session_with_lenbuf(&mut socket, db, len_buf).await
+}
+
+fn parse_startup_params(body: &[u8]) -> HashMap<String, String> {
+    let mut params = HashMap::new();
+    if body.len() <= 4 {
+        return params;
+    }
+    let s = String::from_utf8_lossy(&body[4..]);
+    let parts: Vec<&str> = s.split('\0').filter(|p| !p.is_empty()).collect();
+    for chunk in parts.chunks(2) {
+        if chunk.len() == 2 {
+            params.insert(chunk[0].to_string(), chunk[1].to_string());
+        }
+    }
+    params
 }
 
 async fn handle_postgres_session_with_lenbuf(
@@ -59,6 +74,89 @@ async fn handle_postgres_session_with_lenbuf(
         }
     }
 
+    let params = parse_startup_params(&body);
+    let username = match params.get("user") {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => {
+            write_error_response(
+                socket,
+                "28000",
+                "no PostgreSQL user name specified in startup packet",
+            )
+            .await?;
+            socket.flush().await?;
+            return Ok(());
+        }
+    };
+
+    // 1. Send AuthenticationCleartextPassword challenge ('R', len 8, code 3)
+    socket
+        .write_all(b"R\x00\x00\x00\x08\x00\x00\x00\x03")
+        .await?;
+    socket.flush().await?;
+
+    // 2. Read PasswordMessage ('p')
+    let mut pass_type = [0u8; 1];
+    socket.read_exact(&mut pass_type).await?;
+    if pass_type[0] != b'p' {
+        write_error_response(socket, "28P01", "expected password message").await?;
+        socket.flush().await?;
+        return Ok(());
+    }
+
+    let mut pass_len_buf = [0u8; 4];
+    socket.read_exact(&mut pass_len_buf).await?;
+    let pass_len = u32::from_be_bytes(pass_len_buf) as usize;
+    let mut pass_body = vec![0u8; pass_len.saturating_sub(4)];
+    socket.read_exact(&mut pass_body).await?;
+
+    let password = String::from_utf8_lossy(&pass_body)
+        .trim_matches('\0')
+        .to_string();
+
+    // 3. Verify user credentials against _users table
+    let safe_user = username.replace('\'', "''");
+    let select_user_sql =
+        format!("SELECT id, password_hash, role FROM _users WHERE username = '{safe_user}'");
+
+    let auth_result = db.execute_with_context(&select_user_sql, &ExecutionContext::admin());
+    let mut authenticated_ctx = None;
+
+    if let Ok(ExecResult::Rows { rows, .. }) = auth_result {
+        if let Some(r) = rows.first() {
+            let user_id = match &r[0] {
+                Value::Integer(id) => *id,
+                _ => 1,
+            };
+            let hash = match &r[1] {
+                Value::Text(h) => h.as_str(),
+                _ => "",
+            };
+            let role = match &r[2] {
+                Value::Text(role_str) => role_str.as_str(),
+                _ => "user",
+            };
+
+            if verify_password(&password, hash) {
+                authenticated_ctx = Some(ExecutionContext::authenticated(user_id, role));
+            }
+        }
+    }
+
+    let exec_ctx = match authenticated_ctx {
+        Some(ctx) => ctx,
+        None => {
+            write_error_response(
+                socket,
+                "28P01",
+                &format!("password authentication failed for user \"{}\"", username),
+            )
+            .await?;
+            socket.flush().await?;
+            return Ok(());
+        }
+    };
+
     // Send AuthenticationOk ('R', len 8, code 0)
     write_auth_ok(socket).await?;
 
@@ -73,7 +171,7 @@ async fn handle_postgres_session_with_lenbuf(
     write_ready_for_query(socket, b'I').await?;
     socket.flush().await?;
 
-    // 2. Query execution loop
+    // 4. Query execution loop using authenticated execution context
     loop {
         let mut msg_type_buf = [0u8; 1];
         match socket.read_exact(&mut msg_type_buf).await {
@@ -109,7 +207,7 @@ async fn handle_postgres_session_with_lenbuf(
                         write_data_row(socket, &[Value::Integer(1)]).await?;
                         write_command_complete(socket, "SELECT 1").await?;
                     } else {
-                        match db.execute(&sql) {
+                        match db.execute_with_context(&sql, &exec_ctx) {
                             Ok(ExecResult::Rows { columns, rows }) => {
                                 write_row_description(socket, &columns).await?;
                                 for row in &rows {
