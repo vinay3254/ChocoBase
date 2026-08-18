@@ -40,7 +40,12 @@ pub async fn handle_storage_request(
     _query_str: &str,
     body: &str,
     ctx: &ExecutionContext,
-) -> (u16, &'static str, serde_json::Value, Option<(Vec<u8>, String)>) {
+) -> (
+    u16,
+    &'static str,
+    serde_json::Value,
+    Option<(Vec<u8>, String)>,
+) {
     ensure_storage_tables(db);
     let subpath = path.strip_prefix("/v1/storage/v1").unwrap_or(path);
 
@@ -69,16 +74,40 @@ pub async fn handle_storage_request(
             "POST" => {
                 let payload: serde_json::Value = match serde_json::from_str(body) {
                     Ok(v) => v,
-                    Err(_) => return (400, "Bad Request", serde_json::json!({ "error": "invalid JSON body" }), None),
+                    Err(_) => {
+                        return (
+                            400,
+                            "Bad Request",
+                            serde_json::json!({ "error": "invalid JSON body" }),
+                            None,
+                        )
+                    }
                 };
 
-                let id = match payload.get("id").or_else(|| payload.get("name")).and_then(|v| v.as_str()) {
+                let id = match payload
+                    .get("id")
+                    .or_else(|| payload.get("name"))
+                    .and_then(|v| v.as_str())
+                {
                     Some(s) => sanitize_object_path(s),
-                    None => return (400, "Bad Request", serde_json::json!({ "error": "missing bucket id/name" }), None),
+                    None => {
+                        return (
+                            400,
+                            "Bad Request",
+                            serde_json::json!({ "error": "missing bucket id/name" }),
+                            None,
+                        )
+                    }
                 };
                 let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or(&id);
-                let is_public = payload.get("public").and_then(|v| v.as_bool()).unwrap_or(false);
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                let is_public = payload
+                    .get("public")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
 
                 let sql = format!(
                     "INSERT INTO _storage_buckets (id, name, public, created_at) VALUES ('{id}', '{}', {}, {now})",
@@ -90,12 +119,27 @@ pub async fn handle_storage_request(
                     Ok(_) => {
                         let root = get_storage_root().join(&id);
                         let _ = fs::create_dir_all(&root);
-                        (201, "Created", serde_json::json!({ "name": id, "message": "bucket created successfully" }), None)
+                        (
+                            201,
+                            "Created",
+                            serde_json::json!({ "name": id, "message": "bucket created successfully" }),
+                            None,
+                        )
                     }
-                    Err(e) => (400, "Bad Request", serde_json::json!({ "error": e.to_string() }), None),
+                    Err(e) => (
+                        400,
+                        "Bad Request",
+                        serde_json::json!({ "error": e.to_string() }),
+                        None,
+                    ),
                 }
             }
-            _ => (405, "Method Not Allowed", serde_json::json!({ "error": "method not allowed" }), None),
+            _ => (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+                None,
+            ),
         }
     } else if subpath.starts_with("/bucket/") {
         let bucket_id = sanitize_object_path(&subpath["/bucket/".len()..]);
@@ -105,14 +149,24 @@ pub async fn handle_storage_request(
                 match db.execute_with_context(&sql, ctx) {
                     Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
                         let r = &rows[0];
-                        (200, "OK", serde_json::json!({
-                            "id": match &r[0] { Value::Text(s) => s, _ => "" },
-                            "name": match &r[1] { Value::Text(s) => s, _ => "" },
-                            "public": match &r[2] { Value::Boolean(b) => *b, _ => false },
-                            "created_at": match &r[3] { Value::Integer(i) => *i, _ => 0 },
-                        }), None)
+                        (
+                            200,
+                            "OK",
+                            serde_json::json!({
+                                "id": match &r[0] { Value::Text(s) => s, _ => "" },
+                                "name": match &r[1] { Value::Text(s) => s, _ => "" },
+                                "public": match &r[2] { Value::Boolean(b) => *b, _ => false },
+                                "created_at": match &r[3] { Value::Integer(i) => *i, _ => 0 },
+                            }),
+                            None,
+                        )
                     }
-                    _ => (404, "Not Found", serde_json::json!({ "error": "bucket not found" }), None),
+                    _ => (
+                        404,
+                        "Not Found",
+                        serde_json::json!({ "error": "bucket not found" }),
+                        None,
+                    ),
                 }
             }
             "DELETE" => {
@@ -120,14 +174,28 @@ pub async fn handle_storage_request(
                 let _ = db.execute_with_context(&sql, ctx);
                 let root = get_storage_root().join(&bucket_id);
                 let _ = fs::remove_dir_all(&root);
-                (200, "OK", serde_json::json!({ "message": "bucket deleted" }), None)
+                (
+                    200,
+                    "OK",
+                    serde_json::json!({ "message": "bucket deleted" }),
+                    None,
+                )
             }
-            _ => (405, "Method Not Allowed", serde_json::json!({ "error": "method not allowed" }), None),
+            _ => (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+                None,
+            ),
         }
     } else if subpath.starts_with("/object/") {
         let obj_subpath = &subpath["/object/".len()..];
         let is_public_req = obj_subpath.starts_with("public/");
-        let clean_subpath = if is_public_req { &obj_subpath["public/".len()..] } else { obj_subpath };
+        let clean_subpath = if is_public_req {
+            &obj_subpath["public/".len()..]
+        } else {
+            obj_subpath
+        };
 
         if let Some((bucket_id, object_key)) = clean_subpath.split_once('/') {
             let bucket_id = sanitize_object_path(bucket_id);
@@ -137,16 +205,23 @@ pub async fn handle_storage_request(
             match method {
                 "GET" => {
                     // Check if bucket is public or user has access
-                    let bucket_sql = format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
-                    let is_public_bucket = match db.execute_with_context(&bucket_sql, &ExecutionContext::admin()) {
-                        Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
-                            matches!(&rows[0][0], Value::Boolean(true))
-                        }
-                        _ => false,
-                    };
+                    let bucket_sql =
+                        format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
+                    let is_public_bucket =
+                        match db.execute_with_context(&bucket_sql, &ExecutionContext::admin()) {
+                            Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
+                                matches!(&rows[0][0], Value::Boolean(true))
+                            }
+                            _ => false,
+                        };
 
                     if !is_public_bucket && !ctx.is_authenticated() && !ctx.is_admin {
-                        return (401, "Unauthorized", serde_json::json!({ "error": "access denied to private object" }), None);
+                        return (
+                            401,
+                            "Unauthorized",
+                            serde_json::json!({ "error": "access denied to private object" }),
+                            None,
+                        );
                     }
 
                     let file_path = get_storage_root().join(&bucket_id).join(&object_key);
@@ -154,7 +229,8 @@ pub async fn handle_storage_request(
                         if let Ok(bytes) = fs::read(&file_path) {
                             let content_type = if object_key.ends_with(".png") {
                                 "image/png"
-                            } else if object_key.ends_with(".jpg") || object_key.ends_with(".jpeg") {
+                            } else if object_key.ends_with(".jpg") || object_key.ends_with(".jpeg")
+                            {
                                 "image/jpeg"
                             } else if object_key.ends_with(".json") {
                                 "application/json"
@@ -163,10 +239,20 @@ pub async fn handle_storage_request(
                             } else {
                                 "application/octet-stream"
                             };
-                            return (200, "OK", serde_json::Value::Null, Some((bytes, content_type.to_string())));
+                            return (
+                                200,
+                                "OK",
+                                serde_json::Value::Null,
+                                Some((bytes, content_type.to_string())),
+                            );
                         }
                     }
-                    (404, "Not Found", serde_json::json!({ "error": "object not found" }), None)
+                    (
+                        404,
+                        "Not Found",
+                        serde_json::json!({ "error": "object not found" }),
+                        None,
+                    )
                 }
                 "POST" => {
                     // Upload object
@@ -177,37 +263,77 @@ pub async fn handle_storage_request(
 
                     let bytes = body.as_bytes();
                     if fs::write(&file_path, bytes).is_err() {
-                        return (500, "Internal Server Error", serde_json::json!({ "error": "failed to write object to disk" }), None);
+                        return (
+                            500,
+                            "Internal Server Error",
+                            serde_json::json!({ "error": "failed to write object to disk" }),
+                            None,
+                        );
                     }
 
                     let size_bytes = bytes.len() as i64;
-                    let owner_id = ctx.user_id.map(|id| id.to_string()).unwrap_or_else(|| "NULL".to_string());
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let owner_id = ctx
+                        .user_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "NULL".to_string());
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
 
+                    let esc_obj_id = obj_id.replace('\'', "''");
+                    let esc_bucket_id = bucket_id.replace('\'', "''");
+                    let esc_obj_key = object_key.replace('\'', "''");
                     let insert_sql = format!(
-                        "INSERT INTO _storage_objects (id, bucket_id, name, owner_id, content_type, size_bytes, metadata, created_at, updated_at) VALUES ('{obj_id}', '{bucket_id}', '{object_key}', {owner_id}, 'application/octet-stream', {size_bytes}, '{{}}', {now}, {now})"
+                        "INSERT INTO _storage_objects (id, bucket_id, name, owner_id, content_type, size_bytes, metadata, created_at, updated_at) VALUES ('{esc_obj_id}', '{esc_bucket_id}', '{esc_obj_key}', {owner_id}, 'application/octet-stream', {size_bytes}, '{{}}', {now}, {now})"
                     );
                     let _ = db.execute_with_context(&insert_sql, ctx);
 
-                    (200, "OK", serde_json::json!({
-                        "Key": format!("{bucket_id}/{object_key}"),
-                        "Id": obj_id,
-                        "size": size_bytes
-                    }), None)
+                    (
+                        200,
+                        "OK",
+                        serde_json::json!({
+                            "Key": format!("{bucket_id}/{object_key}"),
+                            "Id": obj_id,
+                            "size": size_bytes
+                        }),
+                        None,
+                    )
                 }
                 "DELETE" => {
                     let file_path = get_storage_root().join(&bucket_id).join(&object_key);
                     let _ = fs::remove_file(file_path);
-                    let sql = format!("DELETE FROM _storage_objects WHERE id = '{obj_id}'");
+                    let esc_obj_id = obj_id.replace('\'', "''");
+                    let sql = format!("DELETE FROM _storage_objects WHERE id = '{esc_obj_id}'");
                     let _ = db.execute_with_context(&sql, ctx);
-                    (200, "OK", serde_json::json!({ "message": "object deleted" }), None)
+                    (
+                        200,
+                        "OK",
+                        serde_json::json!({ "message": "object deleted" }),
+                        None,
+                    )
                 }
-                _ => (405, "Method Not Allowed", serde_json::json!({ "error": "method not allowed" }), None),
+                _ => (
+                    405,
+                    "Method Not Allowed",
+                    serde_json::json!({ "error": "method not allowed" }),
+                    None,
+                ),
             }
         } else {
-            (400, "Bad Request", serde_json::json!({ "error": "missing bucket or object key" }), None)
+            (
+                400,
+                "Bad Request",
+                serde_json::json!({ "error": "missing bucket or object key" }),
+                None,
+            )
         }
     } else {
-        (404, "Not Found", serde_json::json!({ "error": "storage endpoint not found" }), None)
+        (
+            404,
+            "Not Found",
+            serde_json::json!({ "error": "storage endpoint not found" }),
+            None,
+        )
     }
 }
