@@ -58,6 +58,18 @@ pub enum Statement {
         table: String,
         enabled: bool,
     },
+    AlterTableAddColumn {
+        table: String,
+        column: ColumnDef,
+    },
+    AlterTableDropColumn {
+        table: String,
+        column: String,
+    },
+    AlterTableRename {
+        table: String,
+        new_name: String,
+    },
     CreatePolicy {
         name: String,
         table: String,
