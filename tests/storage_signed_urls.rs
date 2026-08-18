@@ -57,12 +57,22 @@ async fn test_signed_storage_download_urls_and_expiry() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let (_server, bound_addr) = HttpServer::bind(addr, db).await.unwrap();
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = dbengine::auth::SessionClaims::new(1, "admin_user", "admin", now + 3600);
+    let token = format!(
+        "Bearer {}",
+        dbengine::auth::sign_jwt(&claims, dbengine::auth::DEFAULT_DEV_JWT_SECRET)
+    );
+
     // 1. Create private bucket
     let (code, _, _) = send_http_request(
         bound_addr,
         "POST",
         "/v1/storage/v1/bucket",
-        None,
+        Some(&token),
         Some(r#"{"id": "confidential", "public": false}"#),
     )
     .await;
@@ -73,7 +83,7 @@ async fn test_signed_storage_download_urls_and_expiry() {
         bound_addr,
         "POST",
         "/v1/storage/v1/object/confidential/secret-doc.txt",
-        None,
+        Some(&token),
         Some("Top secret payload content 12345"),
     )
     .await;
@@ -95,7 +105,7 @@ async fn test_signed_storage_download_urls_and_expiry() {
         bound_addr,
         "POST",
         "/v1/storage/v1/object/sign/confidential/secret-doc.txt",
-        None,
+        Some(&token),
         Some(r#"{"expiresIn": 3600}"#),
     )
     .await;
