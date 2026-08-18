@@ -1,25 +1,47 @@
 //! Authentication, password hashing, and JWT token management for ChocoBase.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 
 use crate::error::{DbError, Result};
 
 pub const DEFAULT_JWT_SECRET: &[u8] = b"chocobase-production-jwt-super-secret-key-32b";
 
+type HmacSha256 = Hmac<Sha256>;
+
+/// Returns the active JWT secret from the environment or default fallback.
+pub fn jwt_secret() -> Vec<u8> {
+    if let Ok(sec) = std::env::var("CHOCOBASE_JWT_SECRET") {
+        if !sec.is_empty() {
+            return sec.into_bytes();
+        }
+    }
+    DEFAULT_JWT_SECRET.to_vec()
+}
+
 /// Authenticated user session claims passed across connection and execution context.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionClaims {
-    pub sub: i64,           // User ID
+    pub sub: i64, // User ID
     pub username: String,
     pub role: String,
-    pub exp: u64,           // Expiry unix timestamp
-    pub iat: u64,           // Issued at unix timestamp
+    pub exp: u64, // Expiry unix timestamp
+    pub iat: u64, // Issued at unix timestamp
 }
 
 impl SessionClaims {
     pub fn new(user_id: i64, username: &str, role: &str, exp: u64) -> Self {
-        let iat = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let iat = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         Self {
             sub: user_id,
             username: username.to_string(),
@@ -73,90 +95,92 @@ impl ExecutionContext {
     }
 }
 
-/// Computes a salted cryptographic hash for a password using PBKDF2/HMAC-SHA256.
+/// Computes a secure password hash using Argon2id with random salt.
 pub fn hash_password(password: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // Generate pseudo-random salt based on timestamp + string
-    let mut hasher = DefaultHasher::new();
-    password.hash(&mut hasher);
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().hash(&mut hasher);
-    let salt = format!("{:016x}", hasher.finish());
-
-    let mut combined_hasher = DefaultHasher::new();
-    salt.hash(&mut combined_hasher);
-    password.hash(&mut combined_hasher);
-    let hash = format!("{:016x}", combined_hasher.finish());
-
-    format!("{salt}${hash}")
-}
-
-/// Verifies a password against a stored salted hash.
-pub fn verify_password(password: &str, stored_hash: &str) -> bool {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let parts: Vec<&str> = stored_hash.split('$').collect();
-    if parts.len() != 2 {
-        return false;
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    match argon2.hash_password(password.as_bytes(), &salt) {
+        Ok(hash) => hash.to_string(),
+        Err(e) => panic!("Argon2id password hashing failed: {e}"),
     }
-    let salt = parts[0];
-    let expected_hash = parts[1];
-
-    let mut hasher = DefaultHasher::new();
-    salt.hash(&mut hasher);
-    password.hash(&mut hasher);
-    let computed_hash = format!("{:016x}", hasher.finish());
-
-    computed_hash == expected_hash
 }
 
-/// Encodes and signs a JWT for a user session.
+/// Verifies a password against an Argon2id stored hash using constant-time comparison.
+pub fn verify_password(password: &str, stored_hash: &str) -> bool {
+    let parsed_hash = match PasswordHash::new(stored_hash) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok()
+}
+
+/// Encodes and signs a JWT using HMAC-SHA256.
 pub fn sign_jwt(claims: &SessionClaims, secret: &[u8]) -> String {
     let header = base64_url_encode(b"{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
     let payload = base64_url_encode(&serde_json::to_vec(claims).unwrap_or_default());
     let to_sign = format!("{header}.{payload}");
 
-    let signature = compute_hmac_signature(to_sign.as_bytes(), secret);
+    let signature_bytes = compute_hmac_signature(to_sign.as_bytes(), secret);
+    let signature = base64_url_encode(&signature_bytes);
     format!("{to_sign}.{signature}")
 }
 
-/// Decodes and verifies a JWT token.
+/// Decodes and verifies a JWT token using constant-time HMAC-SHA256 signature verification.
 pub fn verify_jwt(token: &str, secret: &[u8]) -> Result<SessionClaims> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
-        return Err(DbError::Exec(crate::error::ExecError::InvalidValue("invalid JWT structure".into())));
+        return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+            "invalid JWT structure".into(),
+        )));
     }
 
     let to_sign = format!("{}.{}", parts[0], parts[1]);
-    let expected_sig = compute_hmac_signature(to_sign.as_bytes(), secret);
-    if parts[2] != expected_sig {
-        return Err(DbError::Exec(crate::error::ExecError::InvalidValue("invalid JWT signature".into())));
+    let expected_sig_bytes = compute_hmac_signature(to_sign.as_bytes(), secret);
+    let expected_sig = base64_url_encode(&expected_sig_bytes);
+
+    // Constant-time comparison
+    if expected_sig
+        .as_bytes()
+        .ct_eq(parts[2].as_bytes())
+        .unwrap_u8()
+        != 1
+    {
+        return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+            "invalid JWT signature".into(),
+        )));
     }
 
-    let payload_bytes = base64_url_decode(parts[1])
-        .map_err(|_| DbError::Exec(crate::error::ExecError::InvalidValue("invalid JWT base64 payload".into())))?;
-    let claims: SessionClaims = serde_json::from_slice(&payload_bytes)
-        .map_err(|_| DbError::Exec(crate::error::ExecError::InvalidValue("invalid JWT claims".into())))?;
+    let payload_bytes = base64_url_decode(parts[1]).map_err(|_| {
+        DbError::Exec(crate::error::ExecError::InvalidValue(
+            "invalid JWT base64 payload".into(),
+        ))
+    })?;
+    let claims: SessionClaims = serde_json::from_slice(&payload_bytes).map_err(|_| {
+        DbError::Exec(crate::error::ExecError::InvalidValue(
+            "invalid JWT claims".into(),
+        ))
+    })?;
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     if claims.exp < now {
-        return Err(DbError::Exec(crate::error::ExecError::InvalidValue("JWT token has expired".into())));
+        return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+            "JWT token has expired".into(),
+        )));
     }
 
     Ok(claims)
 }
 
-fn compute_hmac_signature(data: &[u8], secret: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    secret.hash(&mut hasher);
-    data.hash(&mut hasher);
-    let sig = hasher.finish();
-    base64_url_encode(&sig.to_be_bytes())
+fn compute_hmac_signature(data: &[u8], secret: &[u8]) -> Vec<u8> {
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(secret).expect("HMAC can take key of any size");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
 }
 
 fn base64_url_encode(input: &[u8]) -> String {
@@ -165,8 +189,16 @@ fn base64_url_encode(input: &[u8]) -> String {
     let mut i = 0;
     while i < input.len() {
         let b0 = input[i] as u32;
-        let b1 = if i + 1 < input.len() { input[i + 1] as u32 } else { 0 };
-        let b2 = if i + 2 < input.len() { input[i + 2] as u32 } else { 0 };
+        let b1 = if i + 1 < input.len() {
+            input[i + 1] as u32
+        } else {
+            0
+        };
+        let b2 = if i + 2 < input.len() {
+            input[i + 2] as u32
+        } else {
+            0
+        };
 
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
@@ -200,9 +232,21 @@ fn base64_url_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
     let mut i = 0;
     while i < chars.len() {
         let c0 = decode_char(chars[i]).ok_or(())? as u32;
-        let c1 = if i + 1 < chars.len() { decode_char(chars[i + 1]).ok_or(())? as u32 } else { 0 };
-        let c2 = if i + 2 < chars.len() { decode_char(chars[i + 2]).ok_or(())? as u32 } else { 0 };
-        let c3 = if i + 3 < chars.len() { decode_char(chars[i + 3]).ok_or(())? as u32 } else { 0 };
+        let c1 = if i + 1 < chars.len() {
+            decode_char(chars[i + 1]).ok_or(())? as u32
+        } else {
+            0
+        };
+        let c2 = if i + 2 < chars.len() {
+            decode_char(chars[i + 2]).ok_or(())? as u32
+        } else {
+            0
+        };
+        let c3 = if i + 3 < chars.len() {
+            decode_char(chars[i + 3]).ok_or(())? as u32
+        } else {
+            0
+        };
 
         let triple = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
 
