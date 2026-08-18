@@ -249,6 +249,23 @@ impl Database {
                 rls_enabled: false,
             };
             self.catalog.create_table(&mut self.pager, &schema)?;
+
+            // Seed default postgres administrator user
+            let default_pass = std::env::var("CHOCOBASE_POSTGRES_PASSWORD")
+                .unwrap_or_else(|_| "postgres".to_string());
+            let hash = crate::auth::hash_password(&default_pass);
+            let row = vec![
+                Value::Integer(1),
+                Value::Text("postgres".into()),
+                Value::Text(hash),
+                Value::Text("admin".into()),
+            ];
+            let (new_root, _) =
+                crate::exec::mutate::insert_row(&mut self.pager, &schema, &[], &row)?;
+            if new_root != schema.root_page {
+                self.catalog
+                    .update_table_root(&mut self.pager, "_users", new_root)?;
+            }
         }
         Ok(())
     }
@@ -894,6 +911,7 @@ impl Database {
         Ok(ExecResult::Modified(count))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_select(
         &mut self,
         columns: SelectColumns,
@@ -906,19 +924,18 @@ impl Database {
         limit: Option<i64>,
         ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
-        let is_join = match &table_ref {
-            Some(crate::sql::ast::TableRef::Join { .. }) => true,
-            _ => false,
-        };
+        let is_join = matches!(&table_ref, Some(crate::sql::ast::TableRef::Join { .. }));
 
         let has_group_by = _group_by.is_some();
         let has_agg = match &columns {
-            SelectColumns::Items(items) => items.iter().any(|item| match item {
-                SelectItem::Expr {
-                    expr: Expr::Aggregate(_),
-                    ..
-                } => true,
-                _ => false,
+            SelectColumns::Items(items) => items.iter().any(|item| {
+                matches!(
+                    item,
+                    SelectItem::Expr {
+                        expr: Expr::Aggregate(_),
+                        ..
+                    }
+                )
             }),
             _ => false,
         };
@@ -1066,7 +1083,7 @@ impl Database {
                     if let Some((col, desc)) = order_by {
                         let idx = schema
                             .column_index(&col)
-                            .ok_or_else(|| PlanError::NoSuchColumn(col))?;
+                            .ok_or(PlanError::NoSuchColumn(col))?;
                         plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
                     }
                     plan = Box::new(crate::exec::project::ProjectExpr {
@@ -1093,7 +1110,7 @@ impl Database {
             if let Some((col, desc)) = order_by {
                 let idx = schema
                     .column_index(&col)
-                    .ok_or_else(|| PlanError::NoSuchColumn(col))?;
+                    .ok_or(PlanError::NoSuchColumn(col))?;
                 plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
             }
             plan = Box::new(crate::exec::project::Project {
@@ -1435,10 +1452,7 @@ impl Database {
                 ..
             } => {
                 let mut lines = Vec::new();
-                let is_join = match &table_ref {
-                    Some(crate::sql::ast::TableRef::Join { .. }) => true,
-                    _ => false,
-                };
+                let is_join = matches!(table_ref, Some(crate::sql::ast::TableRef::Join { .. }));
                 if is_join {
                     lines.push(format!("-> Join Execution: {table_ref:?}"));
                 } else if let Some(schema) = self.catalog.get_table(&mut self.pager, table)? {
@@ -1889,7 +1903,7 @@ mod tests {
 
         // Database::open must detect that PID 99999999 is dead and successfully reclaim the lock
         let mut db = Database::open(path).unwrap();
-        assert_eq!(db.execute("SELECT 1 FROM non_existent").is_err(), true);
+        assert!(db.execute("SELECT 1 FROM non_existent").is_err());
 
         // Verify the lock file now contains the current process's PID
         let lock_contents = std::fs::read_to_string(&lock_path).unwrap();
