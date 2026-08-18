@@ -234,7 +234,7 @@ fn run_dump(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("database dump failed: {e}");
-            return ExitCode::FAILURE;
+            ExitCode::FAILURE
         }
     }
 }
