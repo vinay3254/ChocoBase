@@ -4,7 +4,20 @@ use crate::types::schema::TableSchema;
 use crate::types::value::{sql_cmp, Value};
 
 pub fn eval(expr: &Expr, schema: &TableSchema, row: &[Value]) -> Result<Value, PlanError> {
+    eval_with_context(expr, schema, row, &crate::auth::ExecutionContext::anonymous())
+}
+
+pub fn eval_with_context(
+    expr: &Expr,
+    schema: &TableSchema,
+    row: &[Value],
+    ctx: &crate::auth::ExecutionContext,
+) -> Result<Value, PlanError> {
     match expr {
+        Expr::AuthUid => match ctx.user_id {
+            Some(uid) => Ok(Value::Integer(uid)),
+            None => Ok(Value::Null),
+        },
         Expr::Column(name) => {
             let idx = schema.column_index(name).ok_or_else(|| PlanError::NoSuchColumn(name.clone()))?;
             Ok(row[idx].clone())
@@ -22,20 +35,47 @@ pub fn eval(expr: &Expr, schema: &TableSchema, row: &[Value]) -> Result<Value, P
         Expr::BoolLiteral(b) => Ok(Value::Boolean(*b)),
         Expr::Null => Ok(Value::Null),
         Expr::IsNull { expr, negated } => {
-            let v = eval(expr, schema, row)?;
+            let v = eval_with_context(expr, schema, row, ctx)?;
             let is_null = matches!(v, Value::Null);
             Ok(Value::Boolean(is_null != *negated))
         }
         Expr::BinaryOp { op, left, right } => {
-            let l = eval(left, schema, row)?;
-            let r = eval(right, schema, row)?;
+            let l = eval_with_context(left, schema, row, ctx)?;
+            let r = eval_with_context(right, schema, row, ctx)?;
             Ok(eval_binop(*op, &l, &r))
+        }
+        Expr::InList { expr, list, negated } => {
+            let target = eval_with_context(expr, schema, row, ctx)?;
+            if matches!(target, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let mut found = false;
+            for item in list {
+                let candidate = eval_with_context(item, schema, row, ctx)?;
+                if target == candidate {
+                    found = true;
+                    break;
+                }
+            }
+            Ok(Value::Boolean(if *negated { !found } else { found }))
+        }
+        Expr::Like { expr, pattern, negated } => {
+            let val = eval_with_context(expr, schema, row, ctx)?;
+            let text = match &val {
+                Value::Text(s) => s.as_str(),
+                Value::Null => return Ok(Value::Null),
+                _ => "",
+            };
+            let text_chars: Vec<char> = text.chars().collect();
+            let pat_chars: Vec<char> = pattern.chars().collect();
+            let is_match = like_match_chars(&text_chars, &pat_chars, 0, 0);
+            Ok(Value::Boolean(if *negated { !is_match } else { is_match }))
         }
         Expr::Aggregate(_) => Err(PlanError::InvalidExpression(
             "aggregate functions cannot be evaluated directly in row context".into(),
         )),
         Expr::JsonExtract { expr, path, as_text } => {
-            let val = eval(expr, schema, row)?;
+            let val = eval_with_context(expr, schema, row, ctx)?;
             let json_str = match &val {
                 Value::Json(s) | Value::Text(s) => s.as_str(),
                 Value::Null => return Ok(Value::Null),
@@ -128,6 +168,27 @@ pub fn is_truthy(v: &Value) -> bool {
     matches!(v, Value::Boolean(true))
 }
 
+fn like_match_chars(text: &[char], pat: &[char], t_idx: usize, p_idx: usize) -> bool {
+    if p_idx == pat.len() {
+        return t_idx == text.len();
+    }
+    if pat[p_idx] == '%' {
+        if p_idx + 1 == pat.len() {
+            return true;
+        }
+        for next_t in t_idx..=text.len() {
+            if like_match_chars(text, pat, next_t, p_idx + 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if t_idx < text.len() && (pat[p_idx] == '_' || pat[p_idx] == text[t_idx]) {
+        return like_match_chars(text, pat, t_idx + 1, p_idx + 1);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +203,7 @@ mod tests {
                 Column { name: "name".into(), ty: ColumnType::Text, not_null: false, is_primary_key: false },
             ],
             root_page: 0,
+            rls_enabled: false,
         }
     }
 

@@ -17,6 +17,26 @@ pub fn build_select_plan(
     order_by: Option<(String, bool)>,
     limit: Option<i64>,
 ) -> Result<Box<dyn Operator>, PlanError> {
+    build_select_plan_with_context(
+        schema,
+        indexes,
+        where_clause,
+        projection_indices,
+        order_by,
+        limit,
+        &crate::auth::ExecutionContext::anonymous(),
+    )
+}
+
+pub fn build_select_plan_with_context(
+    schema: &TableSchema,
+    indexes: &[IndexSchema],
+    where_clause: Option<Expr>,
+    projection_indices: Vec<usize>,
+    order_by: Option<(String, bool)>,
+    limit: Option<i64>,
+    context: &crate::auth::ExecutionContext,
+) -> Result<Box<dyn Operator>, PlanError> {
     let pk_col = schema.columns[schema.primary_key_index()].name.clone();
     let (pk_value, residual) = extract_pk_equality(where_clause, &pk_col);
 
@@ -30,7 +50,7 @@ pub fn build_select_plan(
     };
 
     if let Some(predicate) = residual {
-        plan = Box::new(Filter { input: plan, schema: schema.clone(), predicate });
+        plan = Box::new(Filter { input: plan, schema: schema.clone(), predicate, context: context.clone() });
     }
     if let Some((col, desc)) = order_by {
         let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
@@ -67,6 +87,7 @@ pub fn build_table_ref_plan(
                 name: prefix.to_string(),
                 columns: cols,
                 root_page: base_schema.root_page,
+                rls_enabled: base_schema.rls_enabled,
             };
             let plan: Box<dyn Operator> = Box::new(SeqScan::new(base_schema));
             Ok((plan, schema))
@@ -82,6 +103,7 @@ pub fn build_table_ref_plan(
                 name: format!("{}_join_{}", left_schema.name, right_schema.name),
                 columns: combined_cols,
                 root_page: 0,
+                rls_enabled: false,
             };
 
             let join_op = Box::new(crate::exec::join::NestedLoopJoin::new(
@@ -98,7 +120,7 @@ pub fn build_table_ref_plan(
     }
 }
 
-fn find_index_equality(where_clause: Option<Expr>, indexes: &[IndexSchema]) -> Option<(IndexSchema, Value, Option<Expr>)> {
+pub(crate) fn find_index_equality(where_clause: Option<Expr>, indexes: &[IndexSchema]) -> Option<(IndexSchema, Value, Option<Expr>)> {
     let expr = where_clause?;
     if contains_or(&expr) {
         return None;
@@ -175,7 +197,7 @@ fn literal_value(expr: &Expr) -> Option<Value> {
 /// remaining predicate to apply as a residual filter). Only a top-level chain of
 /// `AND`s is analyzed; any `OR` anywhere disables the optimization entirely and
 /// the whole expression is returned as the residual filter.
-fn extract_pk_equality(where_clause: Option<Expr>, pk_col: &str) -> (Option<Value>, Option<Expr>) {
+pub(crate) fn extract_pk_equality(where_clause: Option<Expr>, pk_col: &str) -> (Option<Value>, Option<Expr>) {
     let Some(expr) = where_clause else {
         return (None, None);
     };
@@ -229,6 +251,7 @@ mod tests {
                 Column { name: "name".into(), ty: ColumnType::Text, not_null: true, is_primary_key: false },
             ],
             root_page: initial_root,
+            rls_enabled: false,
         };
 
         let final_root = {
@@ -266,6 +289,7 @@ mod tests {
             name: "t".into(),
             columns: vec![Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true }],
             root_page: initial_root,
+            rls_enabled: false,
         };
         let final_root = {
             let mut bt = crate::btree::tree::BTree::new(&mut pager, initial_root);
@@ -312,7 +336,12 @@ mod tests {
         let mut pager = Pager::open(file.path()).unwrap();
         pager.reset_read_counter();
         let seq_scan: Box<dyn crate::exec::Operator> = Box::new(SeqScan::new(schema.clone()));
-        let mut seq_plan = Filter { input: seq_scan, schema: schema.clone(), predicate: predicate_for_seq_scan() };
+        let mut seq_plan = Filter {
+            input: seq_scan,
+            schema: schema.clone(),
+            predicate: predicate_for_seq_scan(),
+            context: crate::auth::ExecutionContext::anonymous(),
+        };
         let mut seq_rows = Vec::new();
         while let Some(row) = seq_plan.next(&mut pager).unwrap() {
             seq_rows.push(row);
