@@ -115,7 +115,7 @@ pub async fn handle_functions_request(
         let payload: serde_json::Value =
             serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
 
-        match registry.execute(func_name, &payload, ctx, db) {
+        match registry.execute(func_name, &payload, ctx, db).await {
             Ok(output) => (200, "OK", output),
             Err(e) => (
                 400,
