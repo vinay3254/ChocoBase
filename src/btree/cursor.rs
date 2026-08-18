@@ -19,6 +19,7 @@ impl Cursor {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn next(&mut self, pager: &mut Pager) -> Result<Option<(Vec<u8>, Vec<u8>)>, BTreeError> {
         if self.finished {
             return Ok(None);
