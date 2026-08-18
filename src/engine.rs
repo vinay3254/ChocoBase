@@ -10,9 +10,12 @@ use crate::storage::pager::Pager;
 use crate::types::schema::{Column, TableSchema, IndexSchema};
 use crate::types::value::Value;
 
+use crate::storage::lock::LockFile;
+
 pub struct Database {
     pager: Pager,
     catalog: Catalog,
+    _lock: LockFile,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,33 +27,81 @@ pub enum ExecResult {
 
 impl Database {
     pub fn create(path: &Path) -> Result<Self> {
+        let lock = LockFile::acquire(path)?;
         let mut pager = Pager::create(path)?;
         let catalog = Catalog::bootstrap(&mut pager)?;
-        Ok(Database { pager, catalog })
+        pager.flush()?;
+        Ok(Database { pager, catalog, _lock: lock })
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        let lock = LockFile::acquire(path)?;
         let mut pager = Pager::open(path)?;
         let catalog = Catalog::bootstrap(&mut pager)?;
-        Ok(Database { pager, catalog })
+        pager.flush()?;
+        Ok(Database { pager, catalog, _lock: lock })
     }
 
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult> {
         let stmt = crate::sql::parser::parse(sql)?;
-        let result = match stmt {
-            Statement::CreateTable { name, columns } => self.execute_create_table(name, columns)?,
-            Statement::DropTable { name } => self.execute_drop_table(&name)?,
-            Statement::CreateIndex { name, table, column } => self.execute_create_index(&name, &table, &column)?,
-            Statement::DropIndex { name } => self.execute_drop_index(&name)?,
-            Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows)?,
-            Statement::Select { columns, table, where_clause, order_by, limit } => {
-                self.execute_select(columns, &table, where_clause, order_by, limit)?
+        match stmt {
+            Statement::Begin => {
+                if self.pager.in_transaction() {
+                    return Err(DbError::Plan(PlanError::NestedTransactionNotSupported));
+                }
+                self.pager.begin_transaction()?;
+                Ok(ExecResult::Ok)
             }
-            Statement::Delete { table, where_clause } => self.execute_delete(&table, where_clause)?,
-            Statement::Update { table, assignments, where_clause } => self.execute_update(&table, assignments, where_clause)?,
-        };
-        self.pager.flush()?;
-        Ok(result)
+            Statement::Commit => {
+                if !self.pager.in_transaction() {
+                    return Err(DbError::Plan(PlanError::NoTransactionInProgress));
+                }
+                self.pager.commit_transaction()?;
+                Ok(ExecResult::Ok)
+            }
+            Statement::Rollback => {
+                if !self.pager.in_transaction() {
+                    return Err(DbError::Plan(PlanError::NoTransactionInProgress));
+                }
+                self.pager.rollback_transaction()?;
+                self.catalog = Catalog::bootstrap(&mut self.pager)?;
+                Ok(ExecResult::Ok)
+            }
+            Statement::Select { columns, table, where_clause, order_by, limit } => {
+                self.execute_select(columns, &table, where_clause, order_by, limit)
+            }
+            mutating_stmt => {
+                if self.pager.in_transaction() {
+                    self.execute_mutating(mutating_stmt)
+                } else {
+                    self.pager.begin_transaction()?;
+                    match self.execute_mutating(mutating_stmt) {
+                        Ok(res) => {
+                            self.pager.commit_transaction()?;
+                            Ok(res)
+                        }
+                        Err(e) => {
+                            let _ = self.pager.rollback_transaction();
+                            let _ = Catalog::bootstrap(&mut self.pager).map(|cat| self.catalog = cat);
+                            Err(e)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn execute_mutating(&mut self, stmt: Statement) -> Result<ExecResult> {
+        match stmt {
+            Statement::CreateTable { name, columns } => self.execute_create_table(name, columns),
+            Statement::DropTable { name } => self.execute_drop_table(&name),
+            Statement::CreateIndex { name, table, column } => self.execute_create_index(&name, &table, &column),
+            Statement::DropIndex { name } => self.execute_drop_index(&name),
+            Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows),
+            Statement::Delete { table, where_clause } => self.execute_delete(&table, where_clause),
+            Statement::Update { table, assignments, where_clause } => self.execute_update(&table, assignments, where_clause),
+            _ => unreachable!(),
+        }
     }
 
     fn execute_create_table(&mut self, name: String, columns: Vec<ColumnDef>) -> Result<ExecResult> {
@@ -386,6 +437,14 @@ impl Database {
     }
 }
 
+impl Drop for Database {
+    fn drop(&mut self) {
+        if self.pager.in_transaction() {
+            let _ = self.pager.rollback_transaction();
+        }
+    }
+}
+
 fn literal_to_value(expr: &Expr) -> Result<Value> {
     match expr {
         Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
@@ -580,4 +639,144 @@ mod tests {
             other => panic!("unexpected result: {other:?}"),
         }
     }
+
+    #[test]
+    fn transaction_commit_persists_changes() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        {
+            let mut db = Database::create(path).unwrap();
+            db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)").unwrap();
+            db.execute("BEGIN").unwrap();
+            db.execute("INSERT INTO t (id, val) VALUES (1, 'committed')").unwrap();
+            db.execute("COMMIT").unwrap();
+        }
+        let mut db = Database::open(path).unwrap();
+        let res = db.execute("SELECT val FROM t WHERE id = 1").unwrap();
+        match res {
+            ExecResult::Rows { rows, .. } => assert_eq!(rows, vec![vec![Value::Text("committed".into())]]),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_rollback_discards_mutations() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let mut db = Database::create(path).unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)").unwrap();
+        db.execute("INSERT INTO t (id, val) VALUES (1, 'initial')").unwrap();
+
+        db.execute("BEGIN").unwrap();
+        db.execute("UPDATE t SET val = 'modified' WHERE id = 1").unwrap();
+        db.execute("INSERT INTO t (id, val) VALUES (2, 'new')").unwrap();
+        db.execute("ROLLBACK").unwrap();
+
+        let res = db.execute("SELECT val FROM t WHERE id = 1").unwrap();
+        match res {
+            ExecResult::Rows { rows, .. } => assert_eq!(rows, vec![vec![Value::Text("initial".into())]]),
+            other => panic!("unexpected result: {other:?}"),
+        }
+        let res2 = db.execute("SELECT * FROM t WHERE id = 2").unwrap();
+        match res2 {
+            ExecResult::Rows { rows, .. } => assert!(rows.is_empty()),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_rollback_reverts_ddl_and_catalog() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let mut db = Database::create(path).unwrap();
+        db.execute("CREATE TABLE t1 (id INTEGER PRIMARY KEY)").unwrap();
+
+        db.execute("BEGIN").unwrap();
+        db.execute("CREATE TABLE t2 (id INTEGER PRIMARY KEY)").unwrap();
+        db.execute("DROP TABLE t1").unwrap();
+        db.execute("ROLLBACK").unwrap();
+
+        assert_eq!(db.list_tables(), vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn nested_begin_and_naked_commit_error() {
+        let file = NamedTempFile::new().unwrap();
+        let mut db = Database::create(file.path()).unwrap();
+        assert!(matches!(db.execute("COMMIT").unwrap_err(), DbError::Plan(PlanError::NoTransactionInProgress)));
+        assert!(matches!(db.execute("ROLLBACK").unwrap_err(), DbError::Plan(PlanError::NoTransactionInProgress)));
+
+        db.execute("BEGIN").unwrap();
+        assert!(matches!(db.execute("BEGIN").unwrap_err(), DbError::Plan(PlanError::NestedTransactionNotSupported)));
+        db.execute("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn lock_file_reclaims_dead_pid() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        {
+            let _db = Database::create(path).unwrap();
+        }
+
+        // Simulate a stale lock file written by a non-existent dead PID
+        let lock_path = crate::storage::lock::lock_path_for(path);
+        std::fs::write(&lock_path, "99999999").unwrap();
+
+        // Database::open must detect that PID 99999999 is dead and successfully reclaim the lock
+        let mut db = Database::open(path).unwrap();
+        assert_eq!(db.execute("SELECT 1 FROM non_existent").is_err(), true);
+
+        // Verify the lock file now contains the current process's PID
+        let lock_contents = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(lock_contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn active_lock_prevents_second_open() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        {
+            let _db1 = Database::create(path).unwrap();
+        }
+
+        // Spawn a background dummy child process so we have a guaranteed live foreign PID
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("powershell")
+                .arg("-Command")
+                .arg("Start-Sleep -Seconds 5")
+                .spawn()
+                .unwrap()
+        } else {
+            std::process::Command::new("sleep")
+                .arg("5")
+                .spawn()
+                .unwrap()
+        };
+        let foreign_pid = child.id();
+
+        // Write foreign alive PID to lock file
+        let lock_path = crate::storage::lock::lock_path_for(path);
+        std::fs::write(&lock_path, foreign_pid.to_string()).unwrap();
+
+        // Attempting to open the database simultaneously must fail with DatabaseLocked
+        match Database::open(path) {
+            Err(DbError::Storage(crate::error::StorageError::DatabaseLocked(_))) => (),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("expected DatabaseLocked, got error: {e:?}");
+            }
+            Ok(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("expected DatabaseLocked, got Ok");
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
+
+
