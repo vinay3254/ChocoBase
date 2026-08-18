@@ -28,12 +28,14 @@ fn schema_text(db: &mut Database, table: &str) -> String {
                 .iter()
                 .map(|c| {
                     let ty = match c.ty {
-                        crate::types::value::ColumnType::Integer => "INTEGER",
-                        crate::types::value::ColumnType::Text => "TEXT",
-                        crate::types::value::ColumnType::Boolean => "BOOLEAN",
-                        crate::types::value::ColumnType::Json => "JSON",
+                        crate::types::value::ColumnType::Integer => "INTEGER".to_string(),
+                        crate::types::value::ColumnType::Float => "FLOAT".to_string(),
+                        crate::types::value::ColumnType::Text => "TEXT".to_string(),
+                        crate::types::value::ColumnType::Boolean => "BOOLEAN".to_string(),
+                        crate::types::value::ColumnType::Json => "JSON".to_string(),
+                        crate::types::value::ColumnType::Vector(dim) => format!("VECTOR({dim})"),
                     };
-                    let mut parts = vec![c.name.clone(), ty.to_string()];
+                    let mut parts = vec![c.name.clone(), ty];
                     if c.not_null {
                         parts.push("NOT NULL".to_string());
                     }
