@@ -14,6 +14,7 @@ pub mod server;
 pub mod sql;
 pub mod storage;
 pub mod types;
+pub mod webhooks;
 
 pub use auth::{ExecutionContext, SessionClaims};
 pub use backup::{dump_database, restore_database};
@@ -24,3 +25,4 @@ pub use http::HttpServer;
 pub use migration::{AppliedMigration, Migration, MigrationRunner};
 pub use server::{Server, ServerConfig};
 pub use types::value::Value;
+pub use webhooks::{WebhookConfig, WebhookManager};
