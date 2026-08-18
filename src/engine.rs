@@ -3,13 +3,14 @@ use std::collections::HashMap;
 
 use crate::btree::node::LeafNode;
 use crate::catalog::Catalog;
-use crate::error::{DbError, PlanError, Result};
+use crate::error::{DbError, ExecError, PlanError, Result};
 use crate::exec::Operator;
-use crate::sql::ast::{ColumnDef, Statement, Expr, SelectColumns, SelectItem};
+use crate::sql::ast::{BinOp, ColumnDef, Statement, Expr, SelectColumns, SelectItem};
 use crate::storage::pager::Pager;
 use crate::types::schema::{Column, TableSchema, IndexSchema};
 use crate::types::value::{ColumnType, Value};
 
+use crate::auth::ExecutionContext;
 use crate::storage::lock::LockFile;
 use crate::storage::lock_manager::{LockManager, LockToken};
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,7 @@ pub struct Database {
     catalog: Catalog,
     _lock: LockFile,
     pub change_tx: Option<tokio::sync::broadcast::Sender<crate::server::protocol::ChangeEvent>>,
+    transaction_events: Vec<crate::server::protocol::ChangeEvent>,
 }
 
 /// Thread-safe facade for sharing one embedded database between client threads.
@@ -71,14 +73,28 @@ impl SharedDatabase {
         self.change_tx.subscribe()
     }
 
+    /// Explicitly rolls back any in-flight transaction held by this session upon client disconnection.
+    pub fn rollback_on_disconnect(&self) {
+        let token = self.transaction.lock().unwrap().take();
+        if token.is_some() {
+            let mut db = self.db.lock().unwrap();
+            let _ = db.execute("ROLLBACK");
+            drop(token);
+        }
+    }
+
     pub fn execute(&self, sql: &str) -> Result<ExecResult> {
+        self.execute_with_context(sql, &crate::auth::ExecutionContext::admin())
+    }
+
+    pub fn execute_with_context(&self, sql: &str, ctx: &crate::auth::ExecutionContext) -> Result<ExecResult> {
         let stmt = crate::sql::parser::parse(sql)?;
         match stmt {
             Statement::Begin => {
                 let token = self.locks.begin();
                 token.exclusive("database");
                 let mut db = self.db.lock().unwrap();
-                let result = db.execute(sql);
+                let result = db.execute_with_context(sql, ctx);
                 if result.is_ok() {
                     *self.transaction.lock().unwrap() = Some(token);
                 }
@@ -87,26 +103,26 @@ impl SharedDatabase {
             Statement::Commit | Statement::Rollback => {
                 let token = self.transaction.lock().unwrap().take();
                 let mut db = self.db.lock().unwrap();
-                let result = db.execute(sql);
+                let result = db.execute_with_context(sql, ctx);
                 drop(token);
                 result
             }
             Statement::Select { .. } => {
                 if self.transaction.lock().unwrap().is_some() {
-                    self.db.lock().unwrap().execute(sql)
+                    self.db.lock().unwrap().execute_with_context(sql, ctx)
                 } else {
                     let token = self.locks.begin();
                     token.shared("database");
-                    self.db.lock().unwrap().execute(sql)
+                    self.db.lock().unwrap().execute_with_context(sql, ctx)
                 }
             }
             _ => {
                 if self.transaction.lock().unwrap().is_some() {
-                    self.db.lock().unwrap().execute(sql)
+                    self.db.lock().unwrap().execute_with_context(sql, ctx)
                 } else {
                     let token = self.locks.begin();
                     token.exclusive("database");
-                    self.db.lock().unwrap().execute(sql)
+                    self.db.lock().unwrap().execute_with_context(sql, ctx)
                 }
             }
         }
@@ -142,7 +158,9 @@ impl Database {
         let mut pager = Pager::create(path)?;
         let catalog = Catalog::bootstrap(&mut pager)?;
         pager.flush()?;
-        Ok(Database { pager, catalog, _lock: lock, change_tx: None })
+        let mut db = Database { pager, catalog, _lock: lock, change_tx: None, transaction_events: Vec::new() };
+        db.ensure_auth_table()?;
+        Ok(db)
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -150,16 +168,39 @@ impl Database {
         let mut pager = Pager::open(path)?;
         let catalog = Catalog::bootstrap(&mut pager)?;
         pager.flush()?;
-        Ok(Database { pager, catalog, _lock: lock, change_tx: None })
+        let mut db = Database { pager, catalog, _lock: lock, change_tx: None, transaction_events: Vec::new() };
+        db.ensure_auth_table()?;
+        Ok(db)
+    }
+
+    pub fn ensure_auth_table(&mut self) -> Result<()> {
+        if self.catalog.get_table(&mut self.pager, "_users")?.is_none() {
+            let cols = vec![
+                crate::types::schema::Column { name: "id".into(), ty: crate::types::value::ColumnType::Integer, not_null: true, is_primary_key: true },
+                crate::types::schema::Column { name: "username".into(), ty: crate::types::value::ColumnType::Text, not_null: true, is_primary_key: false },
+                crate::types::schema::Column { name: "password_hash".into(), ty: crate::types::value::ColumnType::Text, not_null: true, is_primary_key: false },
+                crate::types::schema::Column { name: "role".into(), ty: crate::types::value::ColumnType::Text, not_null: true, is_primary_key: false },
+            ];
+            let root = self.pager.allocate_page()?;
+            LeafNode { entries: vec![], next_leaf: 0 }.encode(self.pager.get_page_mut(root)?);
+            let schema = TableSchema { name: "_users".into(), columns: cols, root_page: root, rls_enabled: false };
+            self.catalog.create_table(&mut self.pager, &schema)?;
+        }
+        Ok(())
     }
 
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult> {
+        self.execute_with_context(sql, &crate::auth::ExecutionContext::admin())
+    }
+
+    pub fn execute_with_context(&mut self, sql: &str, ctx: &crate::auth::ExecutionContext) -> Result<ExecResult> {
         let stmt = crate::sql::parser::parse(sql)?;
         match stmt {
             Statement::Begin => {
                 if self.pager.in_transaction() {
                     return Err(DbError::Plan(PlanError::NestedTransactionNotSupported));
                 }
+                self.transaction_events.clear();
                 self.pager.begin_transaction()?;
                 Ok(ExecResult::Ok)
             }
@@ -168,12 +209,18 @@ impl Database {
                     return Err(DbError::Plan(PlanError::NoTransactionInProgress));
                 }
                 self.pager.commit_transaction()?;
+                if let Some(tx) = &self.change_tx {
+                    for event in self.transaction_events.drain(..) {
+                        let _ = tx.send(event);
+                    }
+                }
                 Ok(ExecResult::Ok)
             }
             Statement::Rollback => {
                 if !self.pager.in_transaction() {
                     return Err(DbError::Plan(PlanError::NoTransactionInProgress));
                 }
+                self.transaction_events.clear();
                 self.pager.rollback_transaction()?;
                 self.catalog = Catalog::bootstrap(&mut self.pager)?;
                 Ok(ExecResult::Ok)
@@ -188,19 +235,33 @@ impl Database {
                 order_by,
                 limit,
             } => {
-                self.execute_select(columns, &table, table_ref, where_clause, group_by, having, order_by, limit)
+                self.execute_select(columns, &table, table_ref, where_clause, group_by, having, order_by, limit, ctx)
+            }
+            Statement::Explain(inner_stmt) => {
+                let plan_lines = self.explain_statement(&inner_stmt, ctx)?;
+                let rows = plan_lines.into_iter().map(|line| vec![Value::Text(line)]).collect();
+                Ok(ExecResult::Rows {
+                    columns: vec!["QUERY PLAN".to_string()],
+                    rows,
+                })
             }
             mutating_stmt => {
                 if self.pager.in_transaction() {
-                    self.execute_mutating(mutating_stmt)
+                    self.execute_mutating(mutating_stmt, ctx)
                 } else {
                     self.pager.begin_transaction()?;
-                    match self.execute_mutating(mutating_stmt) {
+                    match self.execute_mutating(mutating_stmt, ctx) {
                         Ok(res) => {
                             self.pager.commit_transaction()?;
+                            if let Some(tx) = &self.change_tx {
+                                for event in self.transaction_events.drain(..) {
+                                    let _ = tx.send(event);
+                                }
+                            }
                             Ok(res)
                         }
                         Err(e) => {
+                            self.transaction_events.clear();
                             let _ = self.pager.rollback_transaction();
                             let _ = Catalog::bootstrap(&mut self.pager).map(|cat| self.catalog = cat);
                             Err(e)
@@ -211,17 +272,125 @@ impl Database {
         }
     }
 
-    fn execute_mutating(&mut self, stmt: Statement) -> Result<ExecResult> {
+    fn apply_rls_filter(
+        &mut self,
+        table: &str,
+        cmd: crate::types::schema::PolicyCmd,
+        user_where: Option<Expr>,
+        ctx: &crate::auth::ExecutionContext,
+    ) -> Result<Option<Expr>> {
+        let schema = match self.catalog.get_table(&mut self.pager, table)? {
+            Some(s) => s,
+            None => return Ok(user_where),
+        };
+        if !schema.rls_enabled || ctx.is_admin {
+            return Ok(user_where);
+        }
+
+        let policies = self.catalog.list_policies_for_table(&mut self.pager, table)?;
+        let matching: Vec<&crate::types::schema::PolicySchema> = policies
+            .iter()
+            .filter(|p| p.cmd == cmd || p.cmd == crate::types::schema::PolicyCmd::All)
+            .collect();
+
+        if matching.is_empty() {
+            // Default deny: condition that is always false
+            return Ok(Some(Expr::BinaryOp {
+                op: BinOp::Eq,
+                left: Box::new(Expr::IntLiteral(1)),
+                right: Box::new(Expr::IntLiteral(0)),
+            }));
+        }
+
+        let mut combined_using: Option<Expr> = None;
+        for p in matching {
+            if let Some(using) = &p.using_expr {
+                combined_using = match combined_using {
+                    Some(prev) => Some(Expr::BinaryOp {
+                        op: BinOp::Or,
+                        left: Box::new(prev),
+                        right: Box::new(using.clone()),
+                    }),
+                    None => Some(using.clone()),
+                };
+            }
+        }
+
+        match (user_where, combined_using) {
+            (Some(w), Some(p)) => Ok(Some(Expr::BinaryOp {
+                op: BinOp::And,
+                left: Box::new(w),
+                right: Box::new(p),
+            })),
+            (None, Some(p)) => Ok(Some(p)),
+            (Some(w), None) => Ok(Some(w)),
+            (None, None) => Ok(None),
+        }
+    }
+
+    fn execute_mutating(&mut self, stmt: Statement, ctx: &crate::auth::ExecutionContext) -> Result<ExecResult> {
         match stmt {
             Statement::CreateTable { name, columns } => self.execute_create_table(name, columns),
             Statement::DropTable { name } => self.execute_drop_table(&name),
             Statement::CreateIndex { name, table, column } => self.execute_create_index(&name, &table, &column),
             Statement::DropIndex { name } => self.execute_drop_index(&name),
-            Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows),
-            Statement::Delete { table, where_clause } => self.execute_delete(&table, where_clause),
-            Statement::Update { table, assignments, where_clause } => self.execute_update(&table, assignments, where_clause),
+            Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows, ctx),
+            Statement::Delete { table, where_clause } => self.execute_delete(&table, where_clause, ctx),
+            Statement::Update { table, assignments, where_clause } => self.execute_update(&table, assignments, where_clause, ctx),
+            Statement::CreateUser { username, password, role } => self.execute_create_user(username, password, role),
+            Statement::AlterTableRls { table, enabled } => self.execute_alter_table_rls(&table, enabled),
+            Statement::CreatePolicy { name, table, cmd, using_expr, with_check } => {
+                self.catalog.create_policy(&mut self.pager, &crate::types::schema::PolicySchema {
+                    name, table, cmd, using_expr, with_check
+                })?;
+                Ok(ExecResult::Ok)
+            }
+            Statement::DropPolicy { name, .. } => {
+                self.catalog.drop_policy(&mut self.pager, &name)?;
+                Ok(ExecResult::Ok)
+            }
             _ => unreachable!(),
         }
+    }
+
+    fn execute_create_user(&mut self, username: String, password: String, role: Option<String>) -> Result<ExecResult> {
+        self.ensure_auth_table()?;
+        let role = role.unwrap_or_else(|| "user".into());
+        let hash = crate::auth::hash_password(&password);
+
+        let mut max_id = 0i64;
+        let schema = self.catalog.get_table(&mut self.pager, "_users")?.unwrap();
+        let mut scan = crate::exec::scan::SeqScan::new(schema.clone());
+        while let Some(row) = scan.next(&mut self.pager)? {
+            if let Value::Text(existing) = &row[1] {
+                if existing == &username {
+                    return Err(DbError::Exec(crate::error::ExecError::InvalidValue(format!("user '{username}' already exists"))));
+                }
+            }
+            if let Value::Integer(id) = row[0] {
+                if id > max_id {
+                    max_id = id;
+                }
+            }
+        }
+
+        let new_id = max_id + 1;
+        let row = vec![
+            Value::Integer(new_id),
+            Value::Text(username),
+            Value::Text(hash),
+            Value::Text(role),
+        ];
+        let (new_root, _) = crate::exec::mutate::insert_row(&mut self.pager, &schema, &[], &row)?;
+        if new_root != schema.root_page {
+            self.catalog.update_table_root(&mut self.pager, "_users", new_root)?;
+        }
+        Ok(ExecResult::Modified(1))
+    }
+
+    fn execute_alter_table_rls(&mut self, table: &str, enabled: bool) -> Result<ExecResult> {
+        self.catalog.set_table_rls(&mut self.pager, table, enabled)?;
+        Ok(ExecResult::Ok)
     }
 
     fn execute_create_table(&mut self, name: String, columns: Vec<ColumnDef>) -> Result<ExecResult> {
@@ -242,7 +411,7 @@ impl Database {
                 is_primary_key: c.primary_key,
             })
             .collect();
-        let schema = TableSchema { name, columns: cols, root_page: root };
+        let schema = TableSchema { name, columns: cols, root_page: root, rls_enabled: false };
         self.catalog.create_table(&mut self.pager, &schema)?;
         Ok(ExecResult::Ok)
     }
@@ -299,12 +468,27 @@ impl Database {
         table: &str,
         columns: Option<Vec<String>>,
         rows: Vec<Vec<Expr>>,
+        ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
         let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+
+        let policies = if schema.rls_enabled && !ctx.is_admin {
+            let list = self.catalog.list_policies_for_table(&mut self.pager, table)?;
+            let matching: Vec<crate::types::schema::PolicySchema> = list
+                .into_iter()
+                .filter(|p| p.cmd == crate::types::schema::PolicyCmd::Insert || p.cmd == crate::types::schema::PolicyCmd::All)
+                .collect();
+            if matching.is_empty() {
+                return Err(DbError::Exec(ExecError::InvalidValue("RLS check failed: no insert policy on table".into())));
+            }
+            Some(matching)
+        } else {
+            None
+        };
 
         let mut table_root = schema.root_page;
         let mut index_roots: HashMap<String, u32> =
@@ -335,9 +519,35 @@ impl Database {
                             found: expr_row.len(),
                         }));
                     }
-                    for (i, expr) in expr_row.iter().enumerate() {
-                        full_row[i] = literal_to_value_typed(expr, Some(&schema.columns[i].ty))?;
+                    for (idx, expr) in expr_row.iter().enumerate() {
+                        full_row[idx] = literal_to_value_typed(expr, Some(&schema.columns[idx].ty))?;
                     }
+                }
+            }
+
+            for (idx, col) in schema.columns.iter().enumerate() {
+                if col.not_null && matches!(full_row[idx], Value::Null) {
+                    return Err(DbError::Exec(ExecError::NotNullViolation(col.name.clone())));
+                }
+            }
+
+            if let Some(pols) = &policies {
+                let mut passed = false;
+                for pol in pols {
+                    let check = pol.with_check.as_ref().or(pol.using_expr.as_ref());
+                    if let Some(expr) = check {
+                        let res = crate::plan::expr::eval_with_context(expr, &schema, &full_row, ctx).map_err(DbError::Plan)?;
+                        if crate::plan::expr::is_truthy(&res) {
+                            passed = true;
+                            break;
+                        }
+                    } else {
+                        passed = true;
+                        break;
+                    }
+                }
+                if !passed {
+                    return Err(DbError::Exec(ExecError::InvalidValue("row violates row-level security policy".into())));
                 }
             }
 
@@ -358,18 +568,21 @@ impl Database {
             for (name, root) in new_index_roots {
                 index_roots.insert(name, root);
             }
-            if let Some(tx) = &self.change_tx {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let _ = tx.send(crate::server::protocol::ChangeEvent {
-                    table: table.to_string(),
-                    action: crate::server::protocol::ChangeAction::Insert,
-                    old_row: None,
-                    new_row: Some(full_row.clone()),
-                    timestamp_ms: now,
-                });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let event = crate::server::protocol::ChangeEvent {
+                table: table.to_string(),
+                action: crate::server::protocol::ChangeAction::Insert,
+                old_row: None,
+                new_row: Some(full_row),
+                timestamp_ms: now,
+            };
+            if self.pager.in_transaction() {
+                self.transaction_events.push(event);
+            } else if let Some(tx) = &self.change_tx {
+                let _ = tx.send(event);
             }
             count += 1;
         }
@@ -392,7 +605,9 @@ impl Database {
         table: &str,
         assignments: Vec<(String, Expr)>,
         where_clause: Option<Expr>,
+        ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
+        let where_clause = self.apply_rls_filter(table, crate::types::schema::PolicyCmd::Update, where_clause, ctx)?;
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
@@ -404,11 +619,14 @@ impl Database {
             let idx = schema
                 .column_index(col_name)
                 .ok_or_else(|| PlanError::NoSuchColumn(col_name.clone()))?;
+            if schema.columns[idx].is_primary_key {
+                return Err(DbError::Plan(PlanError::CannotUpdatePrimaryKey));
+            }
             assignment_indices.push((idx, expr.clone()));
         }
 
         let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-        let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, all_columns, None, None)?;
+        let mut plan = crate::plan::planner::build_select_plan_with_context(&schema, &indexes, where_clause, all_columns, None, None, ctx)?;
         let mut old_rows = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             old_rows.push(row);
@@ -423,7 +641,7 @@ impl Database {
             let mut new_row = old_row.clone();
             for (idx, expr) in &assignment_indices {
                 new_row[*idx] =
-                    crate::plan::expr::eval(expr, &schema, old_row).map_err(DbError::Plan)?;
+                    crate::plan::expr::eval_with_context(expr, &schema, old_row, ctx).map_err(DbError::Plan)?;
             }
 
             let mut schema_for_write = schema.clone();
@@ -448,18 +666,21 @@ impl Database {
             for (name, root) in new_index_roots {
                 index_roots.insert(name, root);
             }
-            if let Some(tx) = &self.change_tx {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let _ = tx.send(crate::server::protocol::ChangeEvent {
-                    table: table.to_string(),
-                    action: crate::server::protocol::ChangeAction::Update,
-                    old_row: Some(old_row.clone()),
-                    new_row: Some(new_row.clone()),
-                    timestamp_ms: now,
-                });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let event = crate::server::protocol::ChangeEvent {
+                table: table.to_string(),
+                action: crate::server::protocol::ChangeAction::Update,
+                old_row: Some(old_row.clone()),
+                new_row: Some(new_row.clone()),
+                timestamp_ms: now,
+            };
+            if self.pager.in_transaction() {
+                self.transaction_events.push(event);
+            } else if let Some(tx) = &self.change_tx {
+                let _ = tx.send(event);
             }
             count += 1;
         }
@@ -487,17 +708,88 @@ impl Database {
         _having: Option<Expr>,
         order_by: Option<(String, bool)>,
         limit: Option<i64>,
+        ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
         let is_join = match &table_ref {
             Some(crate::sql::ast::TableRef::Join { .. }) => true,
             _ => false,
         };
 
+        let has_group_by = _group_by.is_some();
+        let has_agg = match &columns {
+            SelectColumns::Items(items) => items.iter().any(|item| match item {
+                SelectItem::Expr { expr: Expr::Aggregate(_), .. } => true,
+                _ => false,
+            }),
+            _ => false,
+        };
+
+        let where_clause = if !is_join {
+            self.apply_rls_filter(table, crate::types::schema::PolicyCmd::Select, where_clause, ctx)?
+        } else {
+            where_clause
+        };
+
         if is_join {
             let tref = table_ref.unwrap();
             let (mut plan, schema) = crate::plan::planner::build_table_ref_plan(&mut self.catalog, &mut self.pager, &tref)?;
             if let Some(predicate) = where_clause {
-                plan = Box::new(crate::exec::filter::Filter { input: plan, schema: schema.clone(), predicate });
+                plan = Box::new(crate::exec::filter::Filter { input: plan, schema: schema.clone(), predicate, context: ctx.clone() });
+            }
+
+            if has_group_by || has_agg {
+                let mut aggregates = Vec::new();
+                let mut out_names = Vec::new();
+                let mut group_exprs = _group_by.clone().unwrap_or_default();
+
+                if let SelectColumns::Items(items) = &columns {
+                    for item in items {
+                        match item {
+                            SelectItem::Expr { expr: Expr::Aggregate(func), alias } => {
+                                aggregates.push(func.clone());
+                                let name = alias.clone().unwrap_or_else(|| match func {
+                                    crate::sql::ast::AggregateFunc::CountStar => "count(*)".into(),
+                                    crate::sql::ast::AggregateFunc::Count(_) => "count".into(),
+                                    crate::sql::ast::AggregateFunc::Sum(_) => "sum".into(),
+                                    crate::sql::ast::AggregateFunc::Avg(_) => "avg".into(),
+                                    crate::sql::ast::AggregateFunc::Min(_) => "min".into(),
+                                    crate::sql::ast::AggregateFunc::Max(_) => "max".into(),
+                                });
+                                out_names.push(name);
+                            }
+                            SelectItem::Expr { expr, alias } => {
+                                let name = alias.clone().unwrap_or_else(|| match expr {
+                                    Expr::Column(c) => c.clone(),
+                                    Expr::QualifiedColumn { table, column } => format!("{table}.{column}"),
+                                    _ => "expr".into(),
+                                });
+                                out_names.push(name);
+                                if !has_group_by && !group_exprs.contains(expr) {
+                                    group_exprs.push(expr.clone());
+                                }
+                            }
+                            SelectItem::All => return Err(DbError::Plan(PlanError::InvalidExpression("cannot use SELECT * with aggregations".into()))),
+                        }
+                    }
+                }
+
+                let mut agg_plan: Box<dyn Operator> = Box::new(crate::exec::aggregate::AggregateOperator::new(
+                    plan,
+                    schema.clone(),
+                    if group_exprs.is_empty() { None } else { Some(group_exprs) },
+                    aggregates,
+                    _having,
+                ));
+
+                if let Some(n) = limit {
+                    agg_plan = Box::new(crate::exec::limit::Limit::new(agg_plan, n));
+                }
+
+                let mut rows = Vec::new();
+                while let Some(row) = agg_plan.next(&mut self.pager)? {
+                    rows.push(row);
+                }
+                return Ok(ExecResult::Rows { columns: out_names, rows });
             }
 
             let (out_names, indices) = match &columns {
@@ -541,7 +833,7 @@ impl Database {
                         let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
                         plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
                     }
-                    plan = Box::new(crate::exec::project::ProjectExpr { input: plan, schema: schema.clone(), exprs });
+                    plan = Box::new(crate::exec::project::ProjectExpr { input: plan, schema: schema.clone(), exprs, context: ctx.clone() });
                     if let Some(n) = limit {
                         plan = Box::new(crate::exec::limit::Limit::new(plan, n));
                     }
@@ -575,15 +867,6 @@ impl Database {
             .get_table(&mut self.pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
         let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
-
-        let has_group_by = _group_by.is_some();
-        let has_agg = match &columns {
-            SelectColumns::Items(items) => items.iter().any(|item| match item {
-                SelectItem::Expr { expr: Expr::Aggregate(_), .. } => true,
-                _ => false,
-            }),
-            _ => false,
-        };
 
         if has_group_by || has_agg {
             let mut aggregates = Vec::new();
@@ -623,7 +906,7 @@ impl Database {
 
             let seq_scan: Box<dyn Operator> = Box::new(crate::exec::scan::SeqScan::new(schema.clone()));
             let scan_plan = if let Some(predicate) = where_clause {
-                Box::new(crate::exec::filter::Filter { input: seq_scan, schema: schema.clone(), predicate })
+                Box::new(crate::exec::filter::Filter { input: seq_scan, schema: schema.clone(), predicate, context: ctx.clone() })
             } else {
                 seq_scan
             };
@@ -684,8 +967,8 @@ impl Database {
                 }
 
                 let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-                let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, all_columns, order_by, None)?;
-                plan = Box::new(crate::exec::project::ProjectExpr { input: plan, schema: schema.clone(), exprs });
+                let mut plan = crate::plan::planner::build_select_plan_with_context(&schema, &indexes, where_clause, all_columns, order_by, None, ctx)?;
+                plan = Box::new(crate::exec::project::ProjectExpr { input: plan, schema: schema.clone(), exprs, context: ctx.clone() });
                 if let Some(n) = limit {
                     plan = Box::new(crate::exec::limit::Limit::new(plan, n));
                 }
@@ -697,7 +980,7 @@ impl Database {
             }
         };
 
-        let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, indices, order_by, limit)?;
+        let mut plan = crate::plan::planner::build_select_plan_with_context(&schema, &indexes, where_clause, indices, order_by, limit, ctx)?;
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             rows.push(row);
@@ -705,7 +988,8 @@ impl Database {
         Ok(ExecResult::Rows { columns: out_names, rows })
     }
 
-    fn execute_delete(&mut self, table: &str, where_clause: Option<Expr>) -> Result<ExecResult> {
+    fn execute_delete(&mut self, table: &str, where_clause: Option<Expr>, ctx: &crate::auth::ExecutionContext) -> Result<ExecResult> {
+        let where_clause = self.apply_rls_filter(table, crate::types::schema::PolicyCmd::Delete, where_clause, ctx)?;
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
@@ -713,7 +997,7 @@ impl Database {
         let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
 
         let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-        let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, all_columns, None, None)?;
+        let mut plan = crate::plan::planner::build_select_plan_with_context(&schema, &indexes, where_clause, all_columns, None, None, ctx)?;
         let mut rows_to_delete = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             rows_to_delete.push(row);
@@ -742,18 +1026,21 @@ impl Database {
             for (name, root) in new_index_roots {
                 index_roots.insert(name, root);
             }
-            if let Some(tx) = &self.change_tx {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let _ = tx.send(crate::server::protocol::ChangeEvent {
-                    table: table.to_string(),
-                    action: crate::server::protocol::ChangeAction::Delete,
-                    old_row: Some(row.clone()),
-                    new_row: None,
-                    timestamp_ms: now,
-                });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let event = crate::server::protocol::ChangeEvent {
+                table: table.to_string(),
+                action: crate::server::protocol::ChangeAction::Delete,
+                old_row: Some(row.clone()),
+                new_row: None,
+                timestamp_ms: now,
+            };
+            if self.pager.in_transaction() {
+                self.transaction_events.push(event);
+            } else if let Some(tx) = &self.change_tx {
+                let _ = tx.send(event);
             }
             count += 1;
         }
@@ -772,7 +1059,8 @@ impl Database {
     }
 
     pub fn list_tables(&mut self) -> Vec<String> {
-        self.catalog.list_tables(&mut self.pager).unwrap_or_default()
+        let tables = self.catalog.list_tables(&mut self.pager).unwrap_or_default();
+        tables.into_iter().filter(|t| !t.starts_with('_')).collect()
     }
 
     pub fn table_schema(&mut self, name: &str) -> Option<TableSchema> {
@@ -791,6 +1079,56 @@ impl Database {
 
     pub fn pager_stats(&self) -> crate::storage::pager::PagerStats {
         self.pager.stats()
+    }
+
+    pub fn explain_statement(&mut self, stmt: &Statement, _ctx: &ExecutionContext) -> Result<Vec<String>> {
+        match stmt {
+            Statement::Select { table, where_clause, order_by, limit, table_ref, .. } => {
+                let mut lines = Vec::new();
+                let is_join = match &table_ref {
+                    Some(crate::sql::ast::TableRef::Join { .. }) => true,
+                    _ => false,
+                };
+                if is_join {
+                    lines.push(format!("-> Join Execution: {table_ref:?}"));
+                } else if let Some(schema) = self.catalog.get_table(&mut self.pager, table)? {
+                    let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+                    let pk_col = &schema.columns[schema.primary_key_index()].name;
+                    let (pk_val, residual) = crate::plan::planner::extract_pk_equality(where_clause.clone(), pk_col);
+                    if let Some(v) = pk_val {
+                        lines.push(format!("-> TableSeek on {table} (cost=1.0..1.2 rows=1 width={})", schema.columns.len()));
+                        lines.push(format!("   Index Cond: ({pk_col} = {v:?})"));
+                    } else if let Some((idx_schema, val, _)) = crate::plan::planner::find_index_equality(residual, &indexes) {
+                        lines.push(format!("-> IndexSeek on {} using {} (cost=1.0..4.5 rows=10 width={})", table, idx_schema.name, schema.columns.len()));
+                        lines.push(format!("   Index Cond: ({} = {val:?})", idx_schema.column));
+                    } else {
+                        lines.push(format!("-> SeqScan on {table} (cost=0.0..25.0 rows=100 width={})", schema.columns.len()));
+                    }
+                    if let Some(pred) = where_clause {
+                        lines.push(format!("   Filter: {pred:?}"));
+                    }
+                } else {
+                    lines.push(format!("-> Scan on {table}"));
+                }
+                if let Some((col, desc)) = order_by {
+                    lines.push(format!("-> Sort by {col} {}", if *desc { "DESC" } else { "ASC" }));
+                }
+                if let Some(n) = limit {
+                    lines.push(format!("-> Limit {n}"));
+                }
+                Ok(lines)
+            }
+            Statement::Insert { table, rows, .. } => {
+                Ok(vec![format!("-> Insert into {table} (rows={})", rows.len())])
+            }
+            Statement::Update { table, where_clause, .. } => {
+                Ok(vec![format!("-> Update on {table} filter={where_clause:?}")])
+            }
+            Statement::Delete { table, where_clause } => {
+                Ok(vec![format!("-> Delete on {table} filter={where_clause:?}")])
+            }
+            other => Ok(vec![format!("-> Execute statement: {other:?}")]),
+        }
     }
 
     pub fn reset_read_counter(&mut self) {
@@ -815,7 +1153,12 @@ fn literal_to_value_typed(expr: &Expr, target_type: Option<&ColumnType>) -> Resu
     match expr {
         Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
         Expr::StringLiteral(s) => match target_type {
-            Some(ColumnType::Json) => Ok(Value::Json(s.clone())),
+            Some(ColumnType::Json) => {
+                serde_json::from_str::<serde_json::Value>(s).map_err(|e| {
+                    DbError::Exec(crate::error::ExecError::InvalidValue(format!("invalid JSON payload: {e}")))
+                })?;
+                Ok(Value::Json(s.clone()))
+            }
             _ => Ok(Value::Text(s.clone())),
         },
         Expr::BoolLiteral(b) => Ok(Value::Boolean(*b)),
