@@ -1168,7 +1168,19 @@ impl Database {
                         }
                     }
 
-                    if let Some((col, desc)) = order_by {
+                    let (plan_order_by, post_sort) = if let Some((ref col_name, desc)) = order_by {
+                        if schema.column_index(col_name).is_some() {
+                            (Some((col_name.clone(), desc)), None)
+                        } else if let Some(proj_idx) = names.iter().position(|n| n == col_name) {
+                            (None, Some((proj_idx, desc)))
+                        } else {
+                            (Some((col_name.clone(), desc)), None)
+                        }
+                    } else {
+                        (None, None)
+                    };
+
+                    if let Some((col, desc)) = plan_order_by {
                         let idx = schema
                             .column_index(&col)
                             .ok_or(PlanError::NoSuchColumn(col))?;
@@ -1180,6 +1192,9 @@ impl Database {
                         exprs,
                         context: ctx.clone(),
                     });
+                    if let Some((idx, desc)) = post_sort {
+                        plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
+                    }
                     if let Some(n) = limit {
                         plan = Box::new(crate::exec::limit::Limit::new(plan, n));
                     }
@@ -1350,13 +1365,25 @@ impl Database {
                     }
                 }
 
+                let (plan_order_by, post_sort) = if let Some((ref col_name, desc)) = order_by {
+                    if schema.column_index(col_name).is_some() {
+                        (Some((col_name.clone(), desc)), None)
+                    } else if let Some(proj_idx) = names.iter().position(|n| n == col_name) {
+                        (None, Some((proj_idx, desc)))
+                    } else {
+                        (Some((col_name.clone(), desc)), None)
+                    }
+                } else {
+                    (None, None)
+                };
+
                 let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
                 let mut plan = crate::plan::planner::build_select_plan_with_context(
                     &schema,
                     &indexes,
                     where_clause,
                     all_columns,
-                    order_by,
+                    plan_order_by,
                     None,
                     ctx,
                 )?;
@@ -1366,6 +1393,9 @@ impl Database {
                     exprs,
                     context: ctx.clone(),
                 });
+                if let Some((idx, desc)) = post_sort {
+                    plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
+                }
                 if let Some(n) = limit {
                     plan = Box::new(crate::exec::limit::Limit::new(plan, n));
                 }
@@ -1638,7 +1668,11 @@ fn literal_to_value(expr: &Expr) -> Result<Value> {
 
 fn literal_to_value_typed(expr: &Expr, target_type: Option<&ColumnType>) -> Result<Value> {
     match expr {
-        Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
+        Expr::IntLiteral(n) => match target_type {
+            Some(ColumnType::Float) => Ok(Value::Float(*n as f64)),
+            _ => Ok(Value::Integer(*n)),
+        },
+        Expr::FloatLiteral(f) => Ok(Value::Float(*f)),
         Expr::StringLiteral(s) => match target_type {
             Some(ColumnType::Json) => {
                 serde_json::from_str::<serde_json::Value>(s).map_err(|e| {
@@ -1647,6 +1681,22 @@ fn literal_to_value_typed(expr: &Expr, target_type: Option<&ColumnType>) -> Resu
                     )))
                 })?;
                 Ok(Value::Json(s.clone()))
+            }
+            Some(ColumnType::Vector(dim)) => {
+                let vec = serde_json::from_str::<Vec<f32>>(s).map_err(|e| {
+                    DbError::Exec(crate::error::ExecError::InvalidValue(format!(
+                        "invalid vector payload: {e}"
+                    )))
+                })?;
+                if *dim > 0 && vec.len() != *dim {
+                    return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+                        format!(
+                            "vector dimension mismatch: expected {dim}, found {}",
+                            vec.len()
+                        ),
+                    )));
+                }
+                Ok(Value::Vector(vec))
             }
             _ => Ok(Value::Text(s.clone())),
         },
