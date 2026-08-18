@@ -22,6 +22,7 @@ pub enum Statement {
         table: String,
         columns: Option<Vec<String>>,
         rows: Vec<Vec<Expr>>,
+        returning: Option<SelectColumns>,
     },
     Select {
         columns: SelectColumns,
@@ -37,10 +38,12 @@ pub enum Statement {
         table: String,
         assignments: Vec<(String, Expr)>,
         where_clause: Option<Expr>,
+        returning: Option<SelectColumns>,
     },
     Delete {
         table: String,
         where_clause: Option<Expr>,
+        returning: Option<SelectColumns>,
     },
     Begin,
     Commit,
