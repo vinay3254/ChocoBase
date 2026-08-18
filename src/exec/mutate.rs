@@ -109,6 +109,7 @@ mod tests {
                 Column { name: "name".into(), ty: ColumnType::Text, not_null: true, is_primary_key: false },
             ],
             root_page: root,
+            rls_enabled: false,
         }
     }
 

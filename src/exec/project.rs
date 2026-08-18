@@ -21,6 +21,7 @@ pub struct ProjectExpr {
     pub input: Box<dyn Operator>,
     pub schema: crate::types::schema::TableSchema,
     pub exprs: Vec<crate::sql::ast::Expr>,
+    pub context: crate::auth::ExecutionContext,
 }
 
 impl Operator for ProjectExpr {
@@ -29,7 +30,7 @@ impl Operator for ProjectExpr {
             Some(row) => {
                 let mut out = Vec::with_capacity(self.exprs.len());
                 for expr in &self.exprs {
-                    let val = crate::plan::expr::eval(expr, &self.schema, &row)
+                    let val = crate::plan::expr::eval_with_context(expr, &self.schema, &row, &self.context)
                         .map_err(|e| ExecError::InvalidValue(e.to_string()))?;
                     out.push(val);
                 }

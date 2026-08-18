@@ -190,10 +190,8 @@ impl AggregateOperator {
             // Evaluate optional HAVING filter
             let include = match &self.having {
                 Some(cond) => {
-                    match crate::plan::expr::eval(cond, &self.input_schema, &out_row) {
-                        Ok(v) => crate::plan::expr::is_truthy(&v),
-                        Err(_) => true,
-                    }
+                    let v = crate::plan::expr::eval(cond, &self.input_schema, &out_row)?;
+                    crate::plan::expr::is_truthy(&v)
                 }
                 None => true,
             };

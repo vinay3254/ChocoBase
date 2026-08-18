@@ -113,6 +113,7 @@ mod tests {
             name: "t".into(),
             columns: vec![Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true }],
             root_page: root,
+            rls_enabled: false,
         }
     }
 
@@ -186,6 +187,7 @@ mod tests {
                 Column { name: "name".into(), ty: ColumnType::Text, not_null: true, is_primary_key: false },
             ],
             root_page: table_root,
+            rls_enabled: false,
         };
 
         let rows = [(1, "a"), (2, "b"), (3, "a")];
