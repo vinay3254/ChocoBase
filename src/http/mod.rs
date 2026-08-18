@@ -648,16 +648,20 @@ async fn handle_rest_table_crud(
                 }
             }
 
-            if let Some(limit_str) = query_params.get("limit") {
-                if let Ok(limit) = limit_str.parse::<i64>() {
-                    sql.push_str(&format!(" LIMIT {limit}"));
-                }
-            }
+            let offset = query_params
+                .get("offset")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            let limit = query_params
+                .get("limit")
+                .and_then(|s| s.parse::<usize>().ok());
 
             match db.execute_with_context(&sql, ctx) {
                 Ok(ExecResult::Rows { columns, rows }) => {
                     let json_rows: Vec<serde_json::Value> = rows
                         .iter()
+                        .skip(offset)
+                        .take(limit.unwrap_or(usize::MAX))
                         .map(|row| {
                             let mut map = serde_json::Map::new();
                             for (idx, col_name) in columns.iter().enumerate() {
@@ -672,7 +676,7 @@ async fn handle_rest_table_crud(
                 Err(e) => (
                     400,
                     "Bad Request",
-                    serde_json::json!({ "error": e.to_string() }),
+                    serde_json::json!({ "error": e.to_string(), "code": e.sqlstate() }),
                 ),
             }
         }
