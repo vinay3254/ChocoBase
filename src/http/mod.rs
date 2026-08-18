@@ -70,20 +70,61 @@ impl HttpServer {
     }
 }
 
+fn get_cors_header(origin_opt: Option<&str>) -> (String, bool) {
+    let origins_env = std::env::var("CHOCOBASE_CORS_ORIGINS").unwrap_or_else(|_| "*".into());
+    let origin = match origin_opt {
+        Some(o) => o,
+        None => return ("Access-Control-Allow-Origin: *\r\n".to_string(), true),
+    };
+
+    if origins_env == "*" {
+        ("Access-Control-Allow-Origin: *\r\n".to_string(), true)
+    } else {
+        let allowed_list: Vec<&str> = origins_env.split(',').map(|s| s.trim()).collect();
+        if allowed_list.contains(&origin) {
+            (
+                format!("Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\n"),
+                true,
+            )
+        } else {
+            (String::new(), false)
+        }
+    }
+}
+
 async fn handle_http_connection(
     mut socket: TcpStream,
     db: Arc<SharedDatabase>,
     functions_reg: Arc<FunctionRegistry>,
     realtime_mgr: Arc<RealtimeChannelManager>,
 ) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 16384];
-    let n = socket.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(());
+    let mut header_buf = Vec::new();
+    let mut temp_chunk = [0u8; 1024];
+    let mut header_end_pos = None;
+
+    while header_buf.len() < 32768 {
+        let n = socket.read(&mut temp_chunk).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        header_buf.extend_from_slice(&temp_chunk[..n]);
+        if let Some(pos) = header_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end_pos = Some(pos);
+            break;
+        }
     }
 
-    let req_str = String::from_utf8_lossy(&buf[..n]);
-    let mut lines = req_str.lines();
+    let header_pos = match header_end_pos {
+        Some(p) => p,
+        None => {
+            let resp = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n";
+            socket.write_all(resp.as_bytes()).await?;
+            return Ok(());
+        }
+    };
+
+    let header_str = String::from_utf8_lossy(&header_buf[..header_pos]);
+    let mut lines = header_str.lines();
     let request_line = match lines.next() {
         Some(line) => line,
         None => return Ok(()),
@@ -95,18 +136,63 @@ async fn handle_http_connection(
 
     // Parse headers
     let mut auth_token = None;
-    for line in lines.by_ref() {
-        if line.is_empty() {
-            break;
-        }
+    let mut origin_header = None;
+    let mut content_length = 0usize;
+
+    for line in lines {
         if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("authorization") {
-                let v = v.trim();
-                if v.to_lowercase().starts_with("bearer ") {
-                    auth_token = Some(v[7..].trim().to_string());
+            let k_trim = k.trim();
+            let v_trim = v.trim();
+            if k_trim.eq_ignore_ascii_case("authorization") {
+                if v_trim.to_lowercase().starts_with("bearer ") {
+                    auth_token = Some(v_trim[7..].trim().to_string());
                 }
+            } else if k_trim.eq_ignore_ascii_case("origin") {
+                origin_header = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("content-length") {
+                content_length = v_trim.parse().unwrap_or(0);
             }
         }
+    }
+
+    const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10MB limit
+    if content_length > MAX_PAYLOAD_BYTES {
+        let resp_json = serde_json::json!({ "error": "payload too large (max 10MB)" });
+        let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
+        let header = format!(
+            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            resp_bytes.len()
+        );
+        socket.write_all(header.as_bytes()).await?;
+        socket.write_all(&resp_bytes).await?;
+        socket.flush().await?;
+        return Ok(());
+    }
+
+    // Read remaining body bytes if needed
+    let mut body_bytes = header_buf[header_pos + 4..].to_vec();
+    while body_bytes.len() < content_length {
+        let n = socket.read(&mut temp_chunk).await?;
+        if n == 0 {
+            break;
+        }
+        body_bytes.extend_from_slice(&temp_chunk[..n]);
+    }
+    let body = String::from_utf8_lossy(&body_bytes).to_string();
+
+    let (cors_headers, origin_allowed) = get_cors_header(origin_header.as_deref());
+
+    if method == "OPTIONS" {
+        if !origin_allowed {
+            let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            socket.write_all(resp.as_bytes()).await?;
+            return Ok(());
+        }
+        let resp = format!(
+            "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS, PUT\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, apikey\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        socket.write_all(resp.as_bytes()).await?;
+        return Ok(());
     }
 
     let secret = crate::auth::jwt_secret();
@@ -131,37 +217,10 @@ async fn handle_http_connection(
         ExecutionContext::anonymous()
     };
 
-    if method == "OPTIONS" {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\n\r\n";
-        socket.write_all(resp.as_bytes()).await?;
-        return Ok(());
-    }
-
     let (path, query_string) = match full_path.split_once('?') {
         Some((p, q)) => (p, q),
         None => (full_path.as_str(), ""),
     };
-
-    // Extract body after \r\n\r\n
-    let body = if let Some(idx) = req_str.find("\r\n\r\n") {
-        &req_str[idx + 4..]
-    } else {
-        ""
-    };
-
-    const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024; // 10MB limit
-    if body.len() > MAX_PAYLOAD_BYTES {
-        let resp_json = serde_json::json!({ "error": "payload too large" });
-        let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
-        let header = format!(
-            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            resp_bytes.len()
-        );
-        socket.write_all(header.as_bytes()).await?;
-        socket.write_all(&resp_bytes).await?;
-        socket.flush().await?;
-        return Ok(());
-    }
 
     if method == "GET" && (path == "/" || path == "/dashboard") {
         let header = format!(
@@ -178,12 +237,12 @@ async fn handle_http_connection(
 
     if path.starts_with("/v1/storage/") {
         let (status_code, status_text, json_body, binary_data) =
-            storage::handle_storage_request(&db, &method, path, query_string, body, &exec_ctx)
+            storage::handle_storage_request(&db, &method, path, query_string, &body, &exec_ctx)
                 .await;
 
         if let Some((bytes, content_type)) = binary_data {
             let header = format!(
-                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 bytes.len()
             );
             socket.write_all(header.as_bytes()).await?;
@@ -193,7 +252,7 @@ async fn handle_http_connection(
         } else {
             let body_bytes = serde_json::to_vec(&json_body).unwrap_or_default();
             let header = format!(
-                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body_bytes.len()
             );
             socket.write_all(header.as_bytes()).await?;
@@ -262,12 +321,12 @@ async fn handle_http_connection(
                 serde_json::json!({ "error": "admin privileges required" }),
             )
         } else {
-            let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(body) {
+            let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&body) {
                 parsed_json
                     .get("sql")
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| body.to_string())
+                    .unwrap_or_else(|| body.clone())
             } else {
                 body.trim().to_string()
             };
@@ -285,12 +344,12 @@ async fn handle_http_connection(
             }
         }
     } else if method == "POST" && path == "/v1/sql" {
-        let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(body) {
+        let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&body) {
             parsed_json
                 .get("sql")
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| body.to_string())
+                .unwrap_or_else(|| body.clone())
         } else {
             body.trim().to_string()
         };
@@ -316,29 +375,29 @@ async fn handle_http_connection(
             }
         }
     } else if method == "POST" && path == "/v1/auth/signup" {
-        handle_auth_signup(&db, body).await
+        handle_auth_signup(&db, &body).await
     } else if method == "POST" && path == "/v1/auth/token" {
-        handle_auth_token(&db, body).await
+        handle_auth_token(&db, &body).await
     } else if method == "POST" && path == "/v1/auth/refresh" {
-        handle_auth_refresh(&db, body).await
+        handle_auth_refresh(&db, &body).await
+    } else if method == "POST" && path == "/v1/auth/logout" {
+        handle_auth_logout(&db, &body).await
     } else if path.starts_with("/v1/functions/v1") {
-        functions::handle_functions_request(&functions_reg, &db, &method, path, body, &exec_ctx)
+        functions::handle_functions_request(&functions_reg, &db, &method, path, &body, &exec_ctx)
             .await
     } else if path.starts_with("/v1/realtime/v1") {
         realtime_channels::handle_realtime_channel_request(
             &realtime_mgr,
             &method,
             path,
-            body,
+            &body,
             &exec_ctx,
         )
         .await
-    } else if path.starts_with("/v1/rpc/") {
-        let func_name = &path["/v1/rpc/".len()..];
-        handle_rpc(&db, func_name, body, &exec_ctx).await
-    } else if path.starts_with("/v1/rest/") {
-        let table_name = &path["/v1/rest/".len()..];
-        handle_rest_table_crud(&db, &method, table_name, query_string, body, &exec_ctx).await
+    } else if let Some(func_name) = path.strip_prefix("/v1/rpc/") {
+        handle_rpc(&db, func_name, &body, &exec_ctx).await
+    } else if let Some(table_name) = path.strip_prefix("/v1/rest/") {
+        handle_rest_table_crud(&db, &method, table_name, query_string, &body, &exec_ctx).await
     } else {
         (
             404,
@@ -349,7 +408,7 @@ async fn handle_http_connection(
 
     let body_bytes = serde_json::to_vec(&json_body).unwrap_or_default();
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\n{cors_headers}X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status_code,
         status_text,
         body_bytes.len()
@@ -402,40 +461,42 @@ async fn handle_auth_refresh(
         }
     };
 
-    let secret = crate::auth::jwt_secret();
-    match verify_jwt(refresh_token, &secret) {
-        Ok(claims) => {
-            let exp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                + 86400 * 7;
-            let new_claims = SessionClaims::new(claims.sub, &claims.username, &claims.role, exp);
-            let token = sign_jwt(&new_claims, &secret);
-            let refresh = sign_jwt(&new_claims, &secret);
-
+    match crate::auth::rotate_refresh_token(refresh_token) {
+        Ok((new_claims, new_refresh_token)) => {
+            let secret = crate::auth::jwt_secret();
+            let new_access_token = sign_jwt(&new_claims, &secret);
             (
                 200,
                 "OK",
                 serde_json::json!({
-                    "access_token": token,
-                    "refresh_token": refresh,
+                    "access_token": new_access_token,
+                    "refresh_token": new_refresh_token,
                     "token_type": "bearer",
-                    "expires_in": 86400 * 7,
                     "user": {
-                        "id": claims.sub,
-                        "username": claims.username,
-                        "role": claims.role,
+                        "id": new_claims.sub,
+                        "username": new_claims.username,
+                        "role": new_claims.role
                     }
                 }),
             )
         }
-        Err(_) => (
+        Err(e) => (
             401,
             "Unauthorized",
-            serde_json::json!({ "error": "invalid or expired refresh token" }),
+            serde_json::json!({ "error": e.to_string() }),
         ),
     }
+}
+
+async fn handle_auth_logout(
+    _db: &SharedDatabase,
+    body: &str,
+) -> (u16, &'static str, serde_json::Value) {
+    let payload: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    if let Some(refresh_token) = payload.get("refresh_token").and_then(|r| r.as_str()) {
+        crate::auth::revoke_refresh_token(refresh_token);
+    }
+    (200, "OK", serde_json::json!({ "status": "logged_out" }))
 }
 
 async fn handle_rpc(
@@ -558,7 +619,7 @@ async fn handle_auth_signup(
                 + 86400 * 7;
             let claims = SessionClaims::new(user_id, username, role, exp);
             let token = sign_jwt(&claims, &secret);
-            let refresh = sign_jwt(&claims, &secret);
+            let (refresh, _) = crate::auth::issue_refresh_token(user_id, username, role);
 
             (
                 201,
@@ -652,7 +713,7 @@ async fn handle_auth_token(
                         + 86400 * 7;
                     let claims = SessionClaims::new(user_id, username, role, exp);
                     let token = sign_jwt(&claims, &secret);
-                    let refresh = sign_jwt(&claims, &secret);
+                    let (refresh, _) = crate::auth::issue_refresh_token(user_id, username, role);
 
                     (
                         200,
