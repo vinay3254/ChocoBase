@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod backup;
 pub mod btree;
 pub mod catalog;
 pub mod engine;
@@ -14,6 +15,7 @@ pub mod storage;
 pub mod types;
 
 pub use auth::{ExecutionContext, SessionClaims};
+pub use backup::{dump_database, restore_database};
 pub use engine::{Database, ExecResult, SharedDatabase};
 pub use error::{DbError, Result};
 pub use http::HttpServer;
