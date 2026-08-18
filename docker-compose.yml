@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  chocobase:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chocobase-server
+    ports:
+      - "5433:5433" # TCP binary protocol & changefeed
+      - "8080:8080" # HTTP REST gateway, Auth API & Studio Dashboard
+    volumes:
+      - chocobase_data:/data
+    restart: unless-stopped
+
+volumes:
+  chocobase_data:
+    driver: local
