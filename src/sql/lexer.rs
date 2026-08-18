@@ -360,6 +360,8 @@ fn keyword_or_identifier(text: &str) -> Token {
         "COSINE_DISTANCE" => Token::CosineDistance,
         "L2_DISTANCE" => Token::L2Distance,
         "INNER_PRODUCT" => Token::InnerProduct,
+        "FTS_MATCH" | "MATCHES" => Token::FtsMatch,
+        "FTS_RANK" => Token::FtsRank,
         "TEXT" => Token::KwText,
         "BOOLEAN" => Token::KwBoolean,
         "JSON" => Token::KwJson,
