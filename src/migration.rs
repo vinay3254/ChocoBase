@@ -1,10 +1,10 @@
 //! Schema Migration Engine for ChocoBase.
 //! Tracks, versions, and transactionalizes database schema migrations via the `_migrations` system table.
 
-use std::time::{SystemTime, UNIX_EPOCH};
 use crate::engine::{Database, ExecResult};
 use crate::error::Result;
 use crate::types::value::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Migration {
@@ -25,6 +25,40 @@ pub struct MigrationRunner<'a> {
     db: &'a mut Database,
 }
 
+pub fn split_statements(sql: &str) -> Vec<String> {
+    let tokens = match crate::sql::lexer::tokenize(sql) {
+        Ok(t) => t,
+        Err(_) => {
+            return sql
+                .split(';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    };
+
+    let mut stmts = Vec::new();
+    let mut last_offset = 0;
+    for sp in &tokens {
+        if matches!(sp.token, crate::sql::token::Token::Semicolon) {
+            let stmt = sql[last_offset..sp.offset].trim();
+            if !stmt.is_empty() {
+                stmts.push(stmt.to_string());
+            }
+            last_offset = sp.offset + 1;
+        }
+    }
+
+    if last_offset < sql.len() {
+        let trailing = sql[last_offset..].trim();
+        if !trailing.is_empty() {
+            stmts.push(trailing.to_string());
+        }
+    }
+
+    stmts
+}
+
 impl<'a> MigrationRunner<'a> {
     pub fn new(db: &'a mut Database) -> Self {
         Self { db }
@@ -41,15 +75,34 @@ impl<'a> MigrationRunner<'a> {
 
     pub fn get_applied_migrations(&mut self) -> Result<Vec<AppliedMigration>> {
         self.ensure_migrations_table()?;
-        let res = self.db.execute("SELECT id, version, name, applied_at FROM _migrations ORDER BY version ASC")?;
+        let res = self.db.execute(
+            "SELECT id, version, name, applied_at FROM _migrations ORDER BY version ASC",
+        )?;
         let mut list = Vec::new();
         if let ExecResult::Rows { rows, .. } = res {
             for r in rows {
-                let id = match r[0] { Value::Integer(i) => i, _ => 0 };
-                let version = match r[1] { Value::Integer(v) => v, _ => 0 };
-                let name = match &r[2] { Value::Text(s) => s.clone(), _ => String::new() };
-                let applied_at = match r[3] { Value::Integer(t) => t as u64, _ => 0 };
-                list.push(AppliedMigration { id, version, name, applied_at });
+                let id = match r[0] {
+                    Value::Integer(i) => i,
+                    _ => 0,
+                };
+                let version = match r[1] {
+                    Value::Integer(v) => v,
+                    _ => 0,
+                };
+                let name = match &r[2] {
+                    Value::Text(s) => s.clone(),
+                    _ => String::new(),
+                };
+                let applied_at = match r[3] {
+                    Value::Integer(t) => t as u64,
+                    _ => 0,
+                };
+                list.push(AppliedMigration {
+                    id,
+                    version,
+                    name,
+                    applied_at,
+                });
             }
         }
         Ok(list)
@@ -73,7 +126,7 @@ impl<'a> MigrationRunner<'a> {
 
             // Run migration inside transaction
             self.db.execute("BEGIN TRANSACTION")?;
-            for stmt in m.sql.split(';') {
+            for stmt in split_statements(&m.sql) {
                 let s = stmt.trim();
                 if !s.is_empty() {
                     if let Err(e) = self.db.execute(s) {
@@ -84,7 +137,10 @@ impl<'a> MigrationRunner<'a> {
             }
 
             max_id += 1;
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let record_sql = format!(
                 "INSERT INTO _migrations (id, version, name, applied_at) VALUES ({max_id}, {}, '{}', {now})",
                 m.version,

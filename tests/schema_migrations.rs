@@ -21,13 +21,17 @@ fn test_schema_migrations_apply_in_order_and_skip_duplicates() {
         sql: "CREATE TABLE posts (id INTEGER PRIMARY KEY, author_id INTEGER NOT NULL, title TEXT NOT NULL)".into(),
     };
 
-    let applied = runner.apply_all(&[m1.clone(), m2.clone()]).expect("migrations should succeed");
+    let applied = runner
+        .apply_all(&[m1.clone(), m2.clone()])
+        .expect("migrations should succeed");
     assert_eq!(applied.len(), 2);
     assert_eq!(applied[0].version, 1);
     assert_eq!(applied[1].version, 2);
 
     // Re-running apply_all skips already applied migrations
-    let re_applied = runner.apply_all(&[m1.clone(), m2.clone()]).expect("re-apply should succeed");
+    let re_applied = runner
+        .apply_all(&[m1.clone(), m2.clone()])
+        .expect("re-apply should succeed");
     assert_eq!(re_applied.len(), 0);
 
     // Query applied migrations from DB
@@ -79,4 +83,34 @@ fn test_schema_migration_rollback_on_failure() {
 
     // Table created by failing migration was rolled back
     assert!(db.table_schema("orders").is_none());
+}
+
+#[test]
+fn test_schema_migration_handles_semicolons_in_string_literals() {
+    let file = NamedTempFile::new().unwrap();
+    let mut db = Database::create(file.path()).unwrap();
+    let mut runner = MigrationRunner::new(&mut db);
+
+    let m1 = Migration {
+        version: 1,
+        name: "migration_with_semicolons_in_strings".into(),
+        sql: "CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT NOT NULL); INSERT INTO messages (id, content) VALUES (1, 'hello; world; test'); INSERT INTO messages (id, content) VALUES (2, 'second; message')".into(),
+    };
+
+    let applied = runner
+        .apply_all(&[m1])
+        .expect("migration with semicolons in strings should succeed");
+    assert_eq!(applied.len(), 1);
+
+    let res = db
+        .execute("SELECT content FROM messages WHERE id = 1")
+        .unwrap();
+    if let dbengine::engine::ExecResult::Rows { rows, .. } = res {
+        assert_eq!(
+            rows[0][0],
+            dbengine::types::value::Value::Text("hello; world; test".into())
+        );
+    } else {
+        panic!("expected rows");
+    }
 }
