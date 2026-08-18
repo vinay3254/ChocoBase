@@ -9,6 +9,8 @@ const TYPE_INTEGER: u8 = 1;
 const TYPE_TEXT: u8 = 2;
 const TYPE_BOOLEAN: u8 = 3;
 const TYPE_JSON: u8 = 4;
+const TYPE_FLOAT: u8 = 5;
+const TYPE_VECTOR: u8 = 6;
 
 pub fn record_kind(data: &[u8]) -> u8 {
     data[0]
@@ -28,19 +30,11 @@ fn read_string(data: &[u8], pos: usize) -> (String, usize) {
 fn type_tag(ty: &ColumnType) -> u8 {
     match ty {
         ColumnType::Integer => TYPE_INTEGER,
+        ColumnType::Float => TYPE_FLOAT,
         ColumnType::Text => TYPE_TEXT,
         ColumnType::Boolean => TYPE_BOOLEAN,
         ColumnType::Json => TYPE_JSON,
-    }
-}
-
-fn type_from_tag(tag: u8) -> ColumnType {
-    match tag {
-        TYPE_INTEGER => ColumnType::Integer,
-        TYPE_TEXT => ColumnType::Text,
-        TYPE_BOOLEAN => ColumnType::Boolean,
-        TYPE_JSON => ColumnType::Json,
-        _ => panic!("unknown column type tag {tag}"),
+        ColumnType::Vector(_) => TYPE_VECTOR,
     }
 }
 
@@ -52,6 +46,9 @@ pub fn encode_table_record(schema: &TableSchema) -> Vec<u8> {
     for col in &schema.columns {
         write_string(&mut out, &col.name);
         out.push(type_tag(&col.ty));
+        if let ColumnType::Vector(dim) = col.ty {
+            out.extend(&(dim as u16).to_le_bytes());
+        }
         out.push(col.not_null as u8);
         out.push(col.is_primary_key as u8);
     }
@@ -72,8 +69,21 @@ pub fn decode_table_record(data: &[u8]) -> TableSchema {
     for _ in 0..num_cols {
         let (cname, next) = read_string(data, pos);
         pos = next;
-        let ty = type_from_tag(data[pos]);
+        let tag = data[pos];
         pos += 1;
+        let ty = match tag {
+            TYPE_INTEGER => ColumnType::Integer,
+            TYPE_FLOAT => ColumnType::Float,
+            TYPE_TEXT => ColumnType::Text,
+            TYPE_BOOLEAN => ColumnType::Boolean,
+            TYPE_JSON => ColumnType::Json,
+            TYPE_VECTOR => {
+                let dim = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+                pos += 2;
+                ColumnType::Vector(dim)
+            }
+            _ => panic!("unknown column type tag {tag}"),
+        };
         let not_null = data[pos] != 0;
         pos += 1;
         let is_primary_key = data[pos] != 0;
