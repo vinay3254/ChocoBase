@@ -369,6 +369,32 @@ impl Parser {
                     right: Box::new(right),
                 }
             }
+            Token::Exists => {
+                self.expect(&Token::LParen)?;
+                let subquery = self.parse_select()?;
+                self.expect(&Token::RParen)?;
+                Expr::Exists {
+                    subquery: Box::new(subquery),
+                    negated: false,
+                }
+            }
+            Token::Not => {
+                if matches!(self.peek(), Token::Exists) {
+                    self.advance();
+                    self.expect(&Token::LParen)?;
+                    let subquery = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    Expr::Exists {
+                        subquery: Box::new(subquery),
+                        negated: true,
+                    }
+                } else {
+                    return Err(ParseError::Syntax {
+                        offset,
+                        message: "unexpected NOT in expression".into(),
+                    });
+                }
+            }
             Token::Count => {
                 self.expect(&Token::LParen)?;
                 if matches!(self.peek(), Token::Star) {
@@ -668,28 +694,38 @@ impl Parser {
             Token::In => {
                 self.advance();
                 self.expect(&Token::LParen)?;
-                let mut list = Vec::new();
-                loop {
-                    list.push(self.parse_where_expr()?);
-                    match self.peek() {
-                        Token::Comma => {
-                            self.advance();
-                        }
-                        Token::RParen => break,
-                        _ => {
-                            return Err(ParseError::Syntax {
-                                offset: self.peek_offset(),
-                                message: "expected ',' or ')' in IN list".into(),
-                            })
+                if matches!(self.peek(), Token::Select) {
+                    let subquery = self.parse_select()?;
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::InSubquery {
+                        expr: Box::new(left),
+                        subquery: Box::new(subquery),
+                        negated: false,
+                    })
+                } else {
+                    let mut list = Vec::new();
+                    loop {
+                        list.push(self.parse_where_expr()?);
+                        match self.peek() {
+                            Token::Comma => {
+                                self.advance();
+                            }
+                            Token::RParen => break,
+                            _ => {
+                                return Err(ParseError::Syntax {
+                                    offset: self.peek_offset(),
+                                    message: "expected ',' or ')' in IN list".into(),
+                                })
+                            }
                         }
                     }
+                    self.expect(&Token::RParen)?;
+                    Ok(Expr::InList {
+                        expr: Box::new(left),
+                        list,
+                        negated: false,
+                    })
                 }
-                self.expect(&Token::RParen)?;
-                Ok(Expr::InList {
-                    expr: Box::new(left),
-                    list,
-                    negated: false,
-                })
             }
             Token::Like => {
                 self.advance();
@@ -715,28 +751,38 @@ impl Parser {
                     Token::In => {
                         self.advance();
                         self.expect(&Token::LParen)?;
-                        let mut list = Vec::new();
-                        loop {
-                            list.push(self.parse_where_expr()?);
-                            match self.peek() {
-                                Token::Comma => {
-                                    self.advance();
-                                }
-                                Token::RParen => break,
-                                _ => {
-                                    return Err(ParseError::Syntax {
-                                        offset: self.peek_offset(),
-                                        message: "expected ',' or ')' in IN list".into(),
-                                    })
+                        if matches!(self.peek(), Token::Select) {
+                            let subquery = self.parse_select()?;
+                            self.expect(&Token::RParen)?;
+                            Ok(Expr::InSubquery {
+                                expr: Box::new(left),
+                                subquery: Box::new(subquery),
+                                negated: true,
+                            })
+                        } else {
+                            let mut list = Vec::new();
+                            loop {
+                                list.push(self.parse_where_expr()?);
+                                match self.peek() {
+                                    Token::Comma => {
+                                        self.advance();
+                                    }
+                                    Token::RParen => break,
+                                    _ => {
+                                        return Err(ParseError::Syntax {
+                                            offset: self.peek_offset(),
+                                            message: "expected ',' or ')' in IN list".into(),
+                                        })
+                                    }
                                 }
                             }
+                            self.expect(&Token::RParen)?;
+                            Ok(Expr::InList {
+                                expr: Box::new(left),
+                                list,
+                                negated: true,
+                            })
                         }
-                        self.expect(&Token::RParen)?;
-                        Ok(Expr::InList {
-                            expr: Box::new(left),
-                            list,
-                            negated: true,
-                        })
                     }
                     Token::Like => {
                         self.advance();
