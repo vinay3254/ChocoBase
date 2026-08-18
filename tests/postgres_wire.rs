@@ -59,13 +59,21 @@ async fn test_postgres_wire_protocol_handshake_and_query_execution() {
     }
 
     // 3. Send Simple Query: CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)
-    send_simple_query(&mut stream, "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)").await;
+    send_simple_query(
+        &mut stream,
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)",
+    )
+    .await;
     let (tag, rows) = read_query_response(&mut stream).await;
     assert_eq!(tag, "CREATE TABLE");
     assert_eq!(rows.len(), 0);
 
     // 4. Send Simple Query: INSERT INTO items (id, name) VALUES (1, 'Book')
-    send_simple_query(&mut stream, "INSERT INTO items (id, name) VALUES (1, 'Book')").await;
+    send_simple_query(
+        &mut stream,
+        "INSERT INTO items (id, name) VALUES (1, 'Book')",
+    )
+    .await;
     let (tag, rows) = read_query_response(&mut stream).await;
     assert_eq!(tag, "INSERT 0 1");
     assert_eq!(rows.len(), 0);
@@ -126,7 +134,8 @@ async fn read_query_response(stream: &mut TcpStream) -> (String, Vec<Vec<String>
                         row.push("NULL".to_string());
                     } else {
                         let len = col_len as usize;
-                        let text = String::from_utf8_lossy(&msg_body[cursor..cursor + len]).to_string();
+                        let text =
+                            String::from_utf8_lossy(&msg_body[cursor..cursor + len]).to_string();
                         cursor += len;
                         row.push(text);
                     }
@@ -135,7 +144,9 @@ async fn read_query_response(stream: &mut TcpStream) -> (String, Vec<Vec<String>
             }
             b'C' => {
                 // CommandComplete
-                command_tag = String::from_utf8_lossy(&msg_body).trim_matches('\0').to_string();
+                command_tag = String::from_utf8_lossy(&msg_body)
+                    .trim_matches('\0')
+                    .to_string();
             }
             b'Z' => {
                 // ReadyForQuery
@@ -143,7 +154,10 @@ async fn read_query_response(stream: &mut TcpStream) -> (String, Vec<Vec<String>
             }
             b'E' => {
                 // ErrorResponse
-                panic!("received error response: {:?}", String::from_utf8_lossy(&msg_body));
+                panic!(
+                    "received error response: {:?}",
+                    String::from_utf8_lossy(&msg_body)
+                );
             }
             _ => {}
         }

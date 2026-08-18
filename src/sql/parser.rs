@@ -61,7 +61,10 @@ impl Parser {
             Token::KwText => Ok("text".into()),
             Token::KwBoolean => Ok("boolean".into()),
             Token::KwJson => Ok("json".into()),
-            other => Err(ParseError::Syntax { offset, message: format!("expected identifier, found {other:?}") }),
+            other => Err(ParseError::Syntax {
+                offset,
+                message: format!("expected identifier, found {other:?}"),
+            }),
         }
     }
 
@@ -100,7 +103,12 @@ impl Parser {
                 }
                 Statement::Rollback
             }
-            _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected a statement".into() }),
+            _ => {
+                return Err(ParseError::Syntax {
+                    offset: self.peek_offset(),
+                    message: "expected a statement".into(),
+                })
+            }
         };
         if matches!(self.peek(), Token::Semicolon) {
             self.advance();
@@ -115,7 +123,10 @@ impl Parser {
             Token::Index => self.parse_create_index(),
             Token::User => self.parse_create_user(),
             Token::Policy => self.parse_create_policy(),
-            _ => Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected TABLE, INDEX, USER, or POLICY after CREATE".into() }),
+            _ => Err(ParseError::Syntax {
+                offset: self.peek_offset(),
+                message: "expected TABLE, INDEX, USER, or POLICY after CREATE".into(),
+            }),
         }
     }
 
@@ -129,7 +140,12 @@ impl Parser {
         let pwd_offset = self.peek_offset();
         let password = match self.advance() {
             Token::StringLiteral(s) => s,
-            other => return Err(ParseError::Syntax { offset: pwd_offset, message: format!("expected password string literal, found {other:?}") }),
+            other => {
+                return Err(ParseError::Syntax {
+                    offset: pwd_offset,
+                    message: format!("expected password string literal, found {other:?}"),
+                })
+            }
         };
         let mut role = None;
         if matches!(self.peek(), Token::Role) {
@@ -138,10 +154,19 @@ impl Parser {
             role = match self.advance() {
                 Token::StringLiteral(s) => Some(s),
                 Token::Identifier(s) => Some(s),
-                other => return Err(ParseError::Syntax { offset: role_offset, message: format!("expected role string or identifier, found {other:?}") }),
+                other => {
+                    return Err(ParseError::Syntax {
+                        offset: role_offset,
+                        message: format!("expected role string or identifier, found {other:?}"),
+                    })
+                }
             };
         }
-        Ok(Statement::CreateUser { username, password, role })
+        Ok(Statement::CreateUser {
+            username,
+            password,
+            role,
+        })
     }
 
     fn parse_create_policy(&mut self) -> Result<Statement, ParseError> {
@@ -151,12 +176,34 @@ impl Parser {
         let table = self.expect_identifier()?;
         self.expect(&Token::For)?;
         let cmd = match self.peek() {
-            Token::Select => { self.advance(); crate::types::schema::PolicyCmd::Select }
-            Token::Insert => { self.advance(); crate::types::schema::PolicyCmd::Insert }
-            Token::Update => { self.advance(); crate::types::schema::PolicyCmd::Update }
-            Token::Delete => { self.advance(); crate::types::schema::PolicyCmd::Delete }
-            Token::All => { self.advance(); crate::types::schema::PolicyCmd::All }
-            other => return Err(ParseError::Syntax { offset: self.peek_offset(), message: format!("expected SELECT, INSERT, UPDATE, DELETE, or ALL after FOR, found {other:?}") }),
+            Token::Select => {
+                self.advance();
+                crate::types::schema::PolicyCmd::Select
+            }
+            Token::Insert => {
+                self.advance();
+                crate::types::schema::PolicyCmd::Insert
+            }
+            Token::Update => {
+                self.advance();
+                crate::types::schema::PolicyCmd::Update
+            }
+            Token::Delete => {
+                self.advance();
+                crate::types::schema::PolicyCmd::Delete
+            }
+            Token::All => {
+                self.advance();
+                crate::types::schema::PolicyCmd::All
+            }
+            other => {
+                return Err(ParseError::Syntax {
+                    offset: self.peek_offset(),
+                    message: format!(
+                    "expected SELECT, INSERT, UPDATE, DELETE, or ALL after FOR, found {other:?}"
+                ),
+                })
+            }
         };
         let mut using_expr = None;
         if matches!(self.peek(), Token::Using) {
@@ -175,7 +222,13 @@ impl Parser {
             with_check = Some(self.parse_where_expr()?);
             self.expect(&Token::RParen)?;
         }
-        Ok(Statement::CreatePolicy { name, table, cmd, using_expr, with_check })
+        Ok(Statement::CreatePolicy {
+            name,
+            table,
+            cmd,
+            using_expr,
+            with_check,
+        })
     }
 
     fn parse_alter(&mut self) -> Result<Statement, ParseError> {
@@ -185,7 +238,12 @@ impl Parser {
         let enabled = match self.advance() {
             Token::Enable => true,
             Token::Disable => false,
-            other => return Err(ParseError::Syntax { offset: self.peek_offset(), message: format!("expected ENABLE or DISABLE, found {other:?}") }),
+            other => {
+                return Err(ParseError::Syntax {
+                    offset: self.peek_offset(),
+                    message: format!("expected ENABLE or DISABLE, found {other:?}"),
+                })
+            }
         };
         self.expect(&Token::Row)?;
         self.expect(&Token::Level)?;
@@ -206,7 +264,12 @@ impl Parser {
                 Token::KwText => ColumnType::Text,
                 Token::KwBoolean => ColumnType::Boolean,
                 Token::KwJson => ColumnType::Json,
-                other => return Err(ParseError::Syntax { offset: ty_offset, message: format!("expected type, found {other:?}") }),
+                other => {
+                    return Err(ParseError::Syntax {
+                        offset: ty_offset,
+                        message: format!("expected type, found {other:?}"),
+                    })
+                }
             };
             let mut not_null = false;
             let mut primary_key = false;
@@ -221,11 +284,23 @@ impl Parser {
                     primary_key = true;
                 }
             }
-            columns.push(ColumnDef { name: cname, ty, not_null, primary_key });
+            columns.push(ColumnDef {
+                name: cname,
+                ty,
+                not_null,
+                primary_key,
+            });
             match self.peek() {
-                Token::Comma => { self.advance(); }
+                Token::Comma => {
+                    self.advance();
+                }
                 Token::RParen => break,
-                _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')'".into() }),
+                _ => {
+                    return Err(ParseError::Syntax {
+                        offset: self.peek_offset(),
+                        message: "expected ',' or ')'".into(),
+                    })
+                }
             }
         }
         self.expect(&Token::RParen)?;
@@ -236,15 +311,22 @@ impl Parser {
         self.expect(&Token::Drop)?;
         let offset = self.peek_offset();
         match self.advance() {
-            Token::Table => Ok(Statement::DropTable { name: self.expect_identifier()? }),
-            Token::Index => Ok(Statement::DropIndex { name: self.expect_identifier()? }),
+            Token::Table => Ok(Statement::DropTable {
+                name: self.expect_identifier()?,
+            }),
+            Token::Index => Ok(Statement::DropIndex {
+                name: self.expect_identifier()?,
+            }),
             Token::Policy => {
                 let name = self.expect_identifier()?;
                 self.expect(&Token::On)?;
                 let table = self.expect_identifier()?;
                 Ok(Statement::DropPolicy { name, table })
             }
-            other => Err(ParseError::Syntax { offset, message: format!("expected TABLE, INDEX, or POLICY after DROP, found {other:?}") }),
+            other => Err(ParseError::Syntax {
+                offset,
+                message: format!("expected TABLE, INDEX, or POLICY after DROP, found {other:?}"),
+            }),
         }
     }
 
@@ -299,10 +381,21 @@ impl Parser {
                 let path_offset = self.peek_offset();
                 let path = match self.advance() {
                     Token::StringLiteral(s) => s,
-                    other => return Err(ParseError::Syntax { offset: path_offset, message: format!("expected string literal path in JSON_EXTRACT, found {other:?}") }),
+                    other => {
+                        return Err(ParseError::Syntax {
+                            offset: path_offset,
+                            message: format!(
+                                "expected string literal path in JSON_EXTRACT, found {other:?}"
+                            ),
+                        })
+                    }
                 };
                 self.expect(&Token::RParen)?;
-                Expr::JsonExtract { expr: Box::new(inner), path, as_text: true }
+                Expr::JsonExtract {
+                    expr: Box::new(inner),
+                    path,
+                    as_text: true,
+                }
             }
             Token::AuthUid => {
                 if matches!(self.peek(), Token::LParen) {
@@ -322,12 +415,18 @@ impl Parser {
                         }
                         Expr::AuthUid
                     } else {
-                        Expr::QualifiedColumn { table: name, column: fn_name }
+                        Expr::QualifiedColumn {
+                            table: name,
+                            column: fn_name,
+                        }
                     }
                 } else if matches!(self.peek(), Token::Dot) {
                     self.advance();
                     let col = self.expect_identifier()?;
-                    Expr::QualifiedColumn { table: name, column: col }
+                    Expr::QualifiedColumn {
+                        table: name,
+                        column: col,
+                    }
                 } else {
                     Expr::Column(name)
                 }
@@ -340,7 +439,12 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 e
             }
-            other => return Err(ParseError::Syntax { offset, message: format!("expected an expression, found {other:?}") }),
+            other => {
+                return Err(ParseError::Syntax {
+                    offset,
+                    message: format!("expected an expression, found {other:?}"),
+                })
+            }
         };
 
         while matches!(self.peek(), Token::Arrow | Token::ArrowText) {
@@ -349,9 +453,18 @@ impl Parser {
             let path = match self.advance() {
                 Token::StringLiteral(s) => s,
                 Token::Identifier(id) => format!("$.{id}"),
-                other => return Err(ParseError::Syntax { offset: path_offset, message: format!("expected JSON path after arrow, found {other:?}") }),
+                other => {
+                    return Err(ParseError::Syntax {
+                        offset: path_offset,
+                        message: format!("expected JSON path after arrow, found {other:?}"),
+                    })
+                }
             };
-            expr = Expr::JsonExtract { expr: Box::new(expr), path, as_text };
+            expr = Expr::JsonExtract {
+                expr: Box::new(expr),
+                path,
+                as_text,
+            };
         }
 
         Ok(expr)
@@ -368,9 +481,16 @@ impl Parser {
             loop {
                 cols.push(self.expect_identifier()?);
                 match self.peek() {
-                    Token::Comma => { self.advance(); }
+                    Token::Comma => {
+                        self.advance();
+                    }
                     Token::RParen => break,
-                    _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')'".into() }),
+                    _ => {
+                        return Err(ParseError::Syntax {
+                            offset: self.peek_offset(),
+                            message: "expected ',' or ')'".into(),
+                        })
+                    }
                 }
             }
             self.expect(&Token::RParen)?;
@@ -387,19 +507,32 @@ impl Parser {
             loop {
                 row.push(self.parse_primary_expr()?);
                 match self.peek() {
-                    Token::Comma => { self.advance(); }
+                    Token::Comma => {
+                        self.advance();
+                    }
                     Token::RParen => break,
-                    _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')'".into() }),
+                    _ => {
+                        return Err(ParseError::Syntax {
+                            offset: self.peek_offset(),
+                            message: "expected ',' or ')'".into(),
+                        })
+                    }
                 }
             }
             self.expect(&Token::RParen)?;
             rows.push(row);
             match self.peek() {
-                Token::Comma => { self.advance(); }
+                Token::Comma => {
+                    self.advance();
+                }
                 _ => break,
             }
         }
-        Ok(Statement::Insert { table, columns, rows })
+        Ok(Statement::Insert {
+            table,
+            columns,
+            rows,
+        })
     }
 
     fn parse_where_expr(&mut self) -> Result<Expr, ParseError> {
@@ -411,7 +544,11 @@ impl Parser {
         while matches!(self.peek(), Token::Or) {
             self.advance();
             let right = self.parse_and()?;
-            left = Expr::BinaryOp { op: BinOp::Or, left: Box::new(left), right: Box::new(right) };
+            left = Expr::BinaryOp {
+                op: BinOp::Or,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -421,7 +558,11 @@ impl Parser {
         while matches!(self.peek(), Token::And) {
             self.advance();
             let right = self.parse_comparison()?;
-            left = Expr::BinaryOp { op: BinOp::And, left: Box::new(left), right: Box::new(right) };
+            left = Expr::BinaryOp {
+                op: BinOp::And,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -440,7 +581,11 @@ impl Parser {
                     _ => unreachable!(),
                 };
                 let right = self.parse_primary_expr()?;
-                Ok(Expr::BinaryOp { op, left: Box::new(left), right: Box::new(right) })
+                Ok(Expr::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                })
             }
             Token::Is => {
                 self.advance();
@@ -451,7 +596,10 @@ impl Parser {
                     false
                 };
                 self.expect(&Token::Null)?;
-                Ok(Expr::IsNull { expr: Box::new(left), negated })
+                Ok(Expr::IsNull {
+                    expr: Box::new(left),
+                    negated,
+                })
             }
             Token::In => {
                 self.advance();
@@ -460,22 +608,42 @@ impl Parser {
                 loop {
                     list.push(self.parse_where_expr()?);
                     match self.peek() {
-                        Token::Comma => { self.advance(); }
+                        Token::Comma => {
+                            self.advance();
+                        }
                         Token::RParen => break,
-                        _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')' in IN list".into() }),
+                        _ => {
+                            return Err(ParseError::Syntax {
+                                offset: self.peek_offset(),
+                                message: "expected ',' or ')' in IN list".into(),
+                            })
+                        }
                     }
                 }
                 self.expect(&Token::RParen)?;
-                Ok(Expr::InList { expr: Box::new(left), list, negated: false })
+                Ok(Expr::InList {
+                    expr: Box::new(left),
+                    list,
+                    negated: false,
+                })
             }
             Token::Like => {
                 self.advance();
                 let path_offset = self.peek_offset();
                 let pattern = match self.advance() {
                     Token::StringLiteral(s) => s,
-                    other => return Err(ParseError::Syntax { offset: path_offset, message: format!("expected pattern string after LIKE, found {other:?}") }),
+                    other => {
+                        return Err(ParseError::Syntax {
+                            offset: path_offset,
+                            message: format!("expected pattern string after LIKE, found {other:?}"),
+                        })
+                    }
                 };
-                Ok(Expr::Like { expr: Box::new(left), pattern, negated: false })
+                Ok(Expr::Like {
+                    expr: Box::new(left),
+                    pattern,
+                    negated: false,
+                })
             }
             Token::Not => {
                 self.advance();
@@ -487,24 +655,49 @@ impl Parser {
                         loop {
                             list.push(self.parse_where_expr()?);
                             match self.peek() {
-                                Token::Comma => { self.advance(); }
+                                Token::Comma => {
+                                    self.advance();
+                                }
                                 Token::RParen => break,
-                                _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')' in IN list".into() }),
+                                _ => {
+                                    return Err(ParseError::Syntax {
+                                        offset: self.peek_offset(),
+                                        message: "expected ',' or ')' in IN list".into(),
+                                    })
+                                }
                             }
                         }
                         self.expect(&Token::RParen)?;
-                        Ok(Expr::InList { expr: Box::new(left), list, negated: true })
+                        Ok(Expr::InList {
+                            expr: Box::new(left),
+                            list,
+                            negated: true,
+                        })
                     }
                     Token::Like => {
                         self.advance();
                         let path_offset = self.peek_offset();
                         let pattern = match self.advance() {
                             Token::StringLiteral(s) => s,
-                            other => return Err(ParseError::Syntax { offset: path_offset, message: format!("expected pattern string after LIKE, found {other:?}") }),
+                            other => {
+                                return Err(ParseError::Syntax {
+                                    offset: path_offset,
+                                    message: format!(
+                                        "expected pattern string after LIKE, found {other:?}"
+                                    ),
+                                })
+                            }
                         };
-                        Ok(Expr::Like { expr: Box::new(left), pattern, negated: true })
+                        Ok(Expr::Like {
+                            expr: Box::new(left),
+                            pattern,
+                            negated: true,
+                        })
                     }
-                    other => Err(ParseError::Syntax { offset: self.peek_offset(), message: format!("expected IN or LIKE after NOT, found {other:?}") }),
+                    other => Err(ParseError::Syntax {
+                        offset: self.peek_offset(),
+                        message: format!("expected IN or LIKE after NOT, found {other:?}"),
+                    }),
                 }
             }
             _ => Ok(left),
@@ -528,7 +721,9 @@ impl Parser {
                 };
                 items.push(crate::sql::ast::SelectItem::Expr { expr, alias });
                 match self.peek() {
-                    Token::Comma => { self.advance(); }
+                    Token::Comma => {
+                        self.advance();
+                    }
                     _ => break,
                 }
             }
@@ -537,21 +732,37 @@ impl Parser {
         self.expect(&Token::From)?;
         let table = self.expect_identifier()?;
 
-        let mut table_ref = crate::sql::ast::TableRef::Table { name: table.clone(), alias: None };
+        let mut table_ref = crate::sql::ast::TableRef::Table {
+            name: table.clone(),
+            alias: None,
+        };
 
         // Parse optional JOIN clauses
-        while matches!(self.peek(), Token::Join | Token::Inner | Token::Left | Token::Right | Token::Cross) {
+        while matches!(
+            self.peek(),
+            Token::Join | Token::Inner | Token::Left | Token::Right | Token::Cross
+        ) {
             let join_type = match self.advance() {
-                Token::Inner => { self.expect(&Token::Join)?; crate::sql::ast::JoinType::Inner }
+                Token::Inner => {
+                    self.expect(&Token::Join)?;
+                    crate::sql::ast::JoinType::Inner
+                }
                 Token::Left => {
-                    if matches!(self.peek(), Token::Join) { self.advance(); }
+                    if matches!(self.peek(), Token::Join) {
+                        self.advance();
+                    }
                     crate::sql::ast::JoinType::Left
                 }
                 Token::Right => {
-                    if matches!(self.peek(), Token::Join) { self.advance(); }
+                    if matches!(self.peek(), Token::Join) {
+                        self.advance();
+                    }
                     crate::sql::ast::JoinType::Right
                 }
-                Token::Cross => { self.expect(&Token::Join)?; crate::sql::ast::JoinType::Cross }
+                Token::Cross => {
+                    self.expect(&Token::Join)?;
+                    crate::sql::ast::JoinType::Cross
+                }
                 Token::Join => crate::sql::ast::JoinType::Inner,
                 _ => unreachable!(),
             };
@@ -562,7 +773,10 @@ impl Parser {
             } else {
                 None
             };
-            let right_ref = crate::sql::ast::TableRef::Table { name: right_table, alias: right_alias };
+            let right_ref = crate::sql::ast::TableRef::Table {
+                name: right_table,
+                alias: right_alias,
+            };
             let condition = if join_type != crate::sql::ast::JoinType::Cross {
                 self.expect(&Token::On)?;
                 Some(self.parse_where_expr()?)
@@ -591,7 +805,9 @@ impl Parser {
             loop {
                 groups.push(self.parse_where_expr()?);
                 match self.peek() {
-                    Token::Comma => { self.advance(); }
+                    Token::Comma => {
+                        self.advance();
+                    }
                     _ => break,
                 }
             }
@@ -617,8 +833,14 @@ impl Parser {
                 col = format!("{col}.{sub}");
             }
             let desc = match self.peek() {
-                Token::Desc => { self.advance(); true }
-                Token::Asc => { self.advance(); false }
+                Token::Desc => {
+                    self.advance();
+                    true
+                }
+                Token::Asc => {
+                    self.advance();
+                    false
+                }
                 _ => false,
             };
             Some((col, desc))
@@ -631,7 +853,12 @@ impl Parser {
             let offset = self.peek_offset();
             match self.advance() {
                 Token::IntLiteral(n) => Some(n),
-                other => return Err(ParseError::Syntax { offset, message: format!("expected integer after LIMIT, found {other:?}") }),
+                other => {
+                    return Err(ParseError::Syntax {
+                        offset,
+                        message: format!("expected integer after LIMIT, found {other:?}"),
+                    })
+                }
             }
         } else {
             None
@@ -657,7 +884,11 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let column = self.expect_identifier()?;
         self.expect(&Token::RParen)?;
-        Ok(Statement::CreateIndex { name, table, column })
+        Ok(Statement::CreateIndex {
+            name,
+            table,
+            column,
+        })
     }
 
     fn parse_update(&mut self) -> Result<Statement, ParseError> {
@@ -671,7 +902,9 @@ impl Parser {
             let value = self.parse_primary_expr()?;
             assignments.push((col, value));
             match self.peek() {
-                Token::Comma => { self.advance(); }
+                Token::Comma => {
+                    self.advance();
+                }
                 _ => break,
             }
         }
@@ -681,7 +914,11 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::Update { table, assignments, where_clause })
+        Ok(Statement::Update {
+            table,
+            assignments,
+            where_clause,
+        })
     }
 
     fn parse_delete(&mut self) -> Result<Statement, ParseError> {
@@ -694,7 +931,10 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::Delete { table, where_clause })
+        Ok(Statement::Delete {
+            table,
+            where_clause,
+        })
     }
 }
 
@@ -710,14 +950,25 @@ mod tests {
 
     #[test]
     fn parses_create_table() {
-        let stmt = parse("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
+        let stmt =
+            parse("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
         assert_eq!(
             stmt,
             Statement::CreateTable {
                 name: "users".into(),
                 columns: vec![
-                    ColumnDef { name: "id".into(), ty: ColumnType::Integer, not_null: false, primary_key: true },
-                    ColumnDef { name: "name".into(), ty: ColumnType::Text, not_null: true, primary_key: false },
+                    ColumnDef {
+                        name: "id".into(),
+                        ty: ColumnType::Integer,
+                        not_null: false,
+                        primary_key: true
+                    },
+                    ColumnDef {
+                        name: "name".into(),
+                        ty: ColumnType::Text,
+                        not_null: true,
+                        primary_key: false
+                    },
                 ],
             }
         );
@@ -725,7 +976,12 @@ mod tests {
 
     #[test]
     fn parses_drop_table() {
-        assert_eq!(parse("DROP TABLE users").unwrap(), Statement::DropTable { name: "users".into() });
+        assert_eq!(
+            parse("DROP TABLE users").unwrap(),
+            Statement::DropTable {
+                name: "users".into()
+            }
+        );
     }
 
     #[test]
@@ -768,12 +1024,23 @@ mod tests {
         // Confirms AND binds tighter than OR: `a OR b AND c` parses as `a OR (b AND c)`.
         let stmt = parse("SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3").unwrap();
         match stmt {
-            Statement::Select { where_clause: Some(Expr::BinaryOp { op: BinOp::Or, left, right }), .. } => {
-                assert_eq!(*left, Expr::BinaryOp {
-                    op: BinOp::Eq,
-                    left: Box::new(Expr::Column("a".into())),
-                    right: Box::new(Expr::IntLiteral(1)),
-                });
+            Statement::Select {
+                where_clause:
+                    Some(Expr::BinaryOp {
+                        op: BinOp::Or,
+                        left,
+                        right,
+                    }),
+                ..
+            } => {
+                assert_eq!(
+                    *left,
+                    Expr::BinaryOp {
+                        op: BinOp::Eq,
+                        left: Box::new(Expr::Column("a".into())),
+                        right: Box::new(Expr::IntLiteral(1)),
+                    }
+                );
                 assert!(matches!(*right, Expr::BinaryOp { op: BinOp::And, .. }));
             }
             other => panic!("unexpected parse result: {other:?}"),
@@ -784,10 +1051,29 @@ mod tests {
     fn parses_select_with_is_null() {
         let stmt = parse("SELECT id FROM t WHERE name IS NOT NULL").unwrap();
         match stmt {
-            Statement::Select { columns, table, where_clause, order_by, limit, .. } => {
-                assert_eq!(columns, SelectColumns::Items(vec![SelectItem::Expr { expr: Expr::Column("id".into()), alias: None }]));
+            Statement::Select {
+                columns,
+                table,
+                where_clause,
+                order_by,
+                limit,
+                ..
+            } => {
+                assert_eq!(
+                    columns,
+                    SelectColumns::Items(vec![SelectItem::Expr {
+                        expr: Expr::Column("id".into()),
+                        alias: None
+                    }])
+                );
                 assert_eq!(table, "t");
-                assert_eq!(where_clause, Some(Expr::IsNull { expr: Box::new(Expr::Column("name".into())), negated: true }));
+                assert_eq!(
+                    where_clause,
+                    Some(Expr::IsNull {
+                        expr: Box::new(Expr::Column("name".into())),
+                        negated: true
+                    })
+                );
                 assert_eq!(order_by, None);
                 assert_eq!(limit, None);
             }
@@ -799,7 +1085,9 @@ mod tests {
     fn parses_select_with_order_by_and_limit() {
         let stmt = parse("SELECT * FROM t ORDER BY id DESC LIMIT 10").unwrap();
         match stmt {
-            Statement::Select { order_by, limit, .. } => {
+            Statement::Select {
+                order_by, limit, ..
+            } => {
                 assert_eq!(order_by, Some(("id".into(), true)));
                 assert_eq!(limit, Some(10));
             }
@@ -847,8 +1135,17 @@ mod tests {
     fn parses_create_index_and_drop_index() {
         assert_eq!(
             parse("CREATE INDEX idx_name ON t (name)").unwrap(),
-            Statement::CreateIndex { name: "idx_name".into(), table: "t".into(), column: "name".into() }
+            Statement::CreateIndex {
+                name: "idx_name".into(),
+                table: "t".into(),
+                column: "name".into()
+            }
         );
-        assert_eq!(parse("DROP INDEX idx_name").unwrap(), Statement::DropIndex { name: "idx_name".into() });
+        assert_eq!(
+            parse("DROP INDEX idx_name").unwrap(),
+            Statement::DropIndex {
+                name: "idx_name".into()
+            }
+        );
     }
 }

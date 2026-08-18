@@ -81,9 +81,24 @@ mod tests {
         TableSchema {
             name: "t".into(),
             columns: vec![
-                Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true },
-                Column { name: "name".into(), ty: ColumnType::Text, not_null: false, is_primary_key: false },
-                Column { name: "active".into(), ty: ColumnType::Boolean, not_null: false, is_primary_key: false },
+                Column {
+                    name: "id".into(),
+                    ty: ColumnType::Integer,
+                    not_null: true,
+                    is_primary_key: true,
+                },
+                Column {
+                    name: "name".into(),
+                    ty: ColumnType::Text,
+                    not_null: false,
+                    is_primary_key: false,
+                },
+                Column {
+                    name: "active".into(),
+                    ty: ColumnType::Boolean,
+                    not_null: false,
+                    is_primary_key: false,
+                },
             ],
             root_page: 0,
             rls_enabled: false,
@@ -93,7 +108,11 @@ mod tests {
     #[test]
     fn roundtrip_no_nulls() {
         let s = schema();
-        let values = vec![Value::Integer(42), Value::Text("hi".into()), Value::Boolean(true)];
+        let values = vec![
+            Value::Integer(42),
+            Value::Text("hi".into()),
+            Value::Boolean(true),
+        ];
         let encoded = encode_row(&s, &values);
         let decoded = decode_row(&s, &encoded);
         assert_eq!(decoded, values);

@@ -12,7 +12,12 @@ pub struct Sort {
 
 impl Sort {
     pub fn new(input: Box<dyn Operator>, key_index: usize, descending: bool) -> Self {
-        Sort { input, key_index, descending, buffer: None }
+        Sort {
+            input,
+            key_index,
+            descending,
+            buffer: None,
+        }
     }
 }
 
@@ -25,7 +30,11 @@ impl Operator for Sort {
             }
             rows.sort_by(|a, b| {
                 let ord = sql_cmp_nullable(&a[self.key_index], &b[self.key_index]);
-                if self.descending { ord.reverse() } else { ord }
+                if self.descending {
+                    ord.reverse()
+                } else {
+                    ord
+                }
             });
             self.buffer = Some(rows.into_iter());
         }
@@ -52,19 +61,36 @@ mod tests {
 
     #[test]
     fn sorts_ascending_by_key_index() {
-        let input = Fixed(vec![vec![Value::Integer(3)], vec![Value::Integer(1)], vec![Value::Integer(2)]].into_iter());
+        let input = Fixed(
+            vec![
+                vec![Value::Integer(3)],
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+            ]
+            .into_iter(),
+        );
         let mut sort = Sort::new(Box::new(input), 0, false);
         let mut pager = pager();
         let mut seen = Vec::new();
         while let Some(row) = sort.next(&mut pager).unwrap() {
             seen.push(row[0].clone());
         }
-        assert_eq!(seen, vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        assert_eq!(
+            seen,
+            vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]
+        );
     }
 
     #[test]
     fn sorts_descending_and_places_nulls_first() {
-        let input = Fixed(vec![vec![Value::Integer(1)], vec![Value::Null], vec![Value::Integer(2)]].into_iter());
+        let input = Fixed(
+            vec![
+                vec![Value::Integer(1)],
+                vec![Value::Null],
+                vec![Value::Integer(2)],
+            ]
+            .into_iter(),
+        );
         let mut sort = Sort::new(Box::new(input), 0, true);
         let mut pager = pager();
         let mut seen = Vec::new();
@@ -73,6 +99,9 @@ mod tests {
         }
         // descending reverses the whole comparator, including the Null-sorts-first rule,
         // so Null (normally first) ends up last under DESC.
-        assert_eq!(seen, vec![Value::Integer(2), Value::Integer(1), Value::Null]);
+        assert_eq!(
+            seen,
+            vec![Value::Integer(2), Value::Integer(1), Value::Null]
+        );
     }
 }

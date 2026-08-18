@@ -64,6 +64,9 @@ mod tests {
     #[test]
     fn rejects_bad_magic() {
         let page = Page::zeroed();
-        assert!(matches!(Header::read_from(&page), Err(StorageError::NotADatabase)));
+        assert!(matches!(
+            Header::read_from(&page),
+            Err(StorageError::NotADatabase)
+        ));
     }
 }

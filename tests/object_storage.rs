@@ -32,11 +32,17 @@ async fn send_http_request(
     let resp_str = String::from_utf8_lossy(&buf);
     let mut lines = resp_str.lines();
     let status_line = lines.next().unwrap();
-    let status_code: u16 = status_line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
 
     let body_idx = resp_str.find("\r\n\r\n").unwrap() + 4;
     let raw_body = buf[body_idx..].to_vec();
-    let json_body: serde_json::Value = serde_json::from_slice(&raw_body).unwrap_or(serde_json::Value::Null);
+    let json_body: serde_json::Value =
+        serde_json::from_slice(&raw_body).unwrap_or(serde_json::Value::Null);
 
     (status_code, json_body, raw_body)
 }
@@ -61,7 +67,8 @@ async fn test_object_storage_buckets_and_objects_lifecycle() {
     assert_eq!(res["name"], "photos");
 
     // 2. List buckets
-    let (code, buckets, _) = send_http_request(bound_addr, "GET", "/v1/storage/v1/bucket", None, None).await;
+    let (code, buckets, _) =
+        send_http_request(bound_addr, "GET", "/v1/storage/v1/bucket", None, None).await;
     assert_eq!(code, 200);
     let arr = buckets.as_array().unwrap();
     assert!(arr.iter().any(|b| b["id"] == "photos"));

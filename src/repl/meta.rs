@@ -85,7 +85,8 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
         std::mem::forget(file); // acceptable here: test runs and drops db within the same call, no cross-scope reopen
-        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            .unwrap();
         db
     }
 
@@ -130,7 +131,10 @@ mod tests {
     fn btree_dumps_table_structure() {
         let mut db = db_with_one_table();
         for i in 0..50 {
-            db.execute(&format!("INSERT INTO users (id, name) VALUES ({i}, 'n{i}')")).unwrap();
+            db.execute(&format!(
+                "INSERT INTO users (id, name) VALUES ({i}, 'n{i}')"
+            ))
+            .unwrap();
         }
         let out = dispatch(&mut db, "btree users");
         assert!(out.contains("leaf page"));

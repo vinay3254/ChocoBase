@@ -1,5 +1,5 @@
-use crate::error::BTreeError;
 use crate::btree::node::LeafEntry;
+use crate::error::BTreeError;
 use crate::storage::pager::Pager;
 
 pub struct Cursor {
@@ -11,7 +11,12 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn empty() -> Self {
-        Cursor { index: 0, entries: Vec::new(), next_leaf: 0, finished: true }
+        Cursor {
+            index: 0,
+            entries: Vec::new(),
+            next_leaf: 0,
+            finished: true,
+        }
     }
 
     pub fn next(&mut self, pager: &mut Pager) -> Result<Option<(Vec<u8>, Vec<u8>)>, BTreeError> {
@@ -38,26 +43,36 @@ impl Cursor {
 
 impl Cursor {
     pub(crate) fn from_leaf(entries: Vec<LeafEntry>, index: usize, next_leaf: u32) -> Self {
-        Cursor { index, entries, next_leaf, finished: false }
+        Cursor {
+            index,
+            entries,
+            next_leaf,
+            finished: false,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::tree::BTree;
-    use crate::storage::pager::Pager;
     use crate::btree::node::LeafNode;
+    use crate::storage::pager::Pager;
     use tempfile::NamedTempFile;
 
     fn build(keys: &[u32]) -> (Pager, u32) {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let initial_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(initial_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(initial_root).unwrap());
         let final_root = {
             let mut bt = BTree::new(&mut pager, initial_root);
             for &k in keys {
-                bt.insert(&k.to_be_bytes(), format!("v{k}").as_bytes()).unwrap();
+                bt.insert(&k.to_be_bytes(), format!("v{k}").as_bytes())
+                    .unwrap();
             }
             bt.root()
         };
@@ -79,7 +94,11 @@ mod tests {
     #[test]
     fn seek_positions_at_first_key_greater_or_equal() {
         let (mut pager, root) = build(&[10, 20, 30, 40]);
-        let mut cursor = { BTree::new(&mut pager, root).cursor_seek(&25u32.to_be_bytes()).unwrap() };
+        let mut cursor = {
+            BTree::new(&mut pager, root)
+                .cursor_seek(&25u32.to_be_bytes())
+                .unwrap()
+        };
         let (k, _) = cursor.next(&mut pager).unwrap().unwrap();
         assert_eq!(u32::from_be_bytes(k.try_into().unwrap()), 30);
     }
@@ -96,7 +115,11 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let initial_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(initial_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(initial_root).unwrap());
         let final_root = {
             let mut bt = BTree::new(&mut pager, initial_root);
             for key in [vec![1u8, 1], vec![1, 2, 3], vec![1, 3]] {
@@ -106,7 +129,11 @@ mod tests {
         };
         pager.flush().unwrap();
 
-        let mut cursor = { BTree::new(&mut pager, final_root).cursor_seek(&[1, 2]).unwrap() };
+        let mut cursor = {
+            BTree::new(&mut pager, final_root)
+                .cursor_seek(&[1, 2])
+                .unwrap()
+        };
         let (k, _) = cursor.next(&mut pager).unwrap().unwrap();
         assert_eq!(k, vec![1, 2, 3]);
     }

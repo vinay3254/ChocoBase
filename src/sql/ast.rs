@@ -1,13 +1,28 @@
-use serde::{Deserialize, Serialize};
 use crate::types::value::ColumnType;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    CreateTable { name: String, columns: Vec<ColumnDef> },
-    DropTable { name: String },
-    CreateIndex { name: String, table: String, column: String },
-    DropIndex { name: String },
-    Insert { table: String, columns: Option<Vec<String>>, rows: Vec<Vec<Expr>> },
+    CreateTable {
+        name: String,
+        columns: Vec<ColumnDef>,
+    },
+    DropTable {
+        name: String,
+    },
+    CreateIndex {
+        name: String,
+        table: String,
+        column: String,
+    },
+    DropIndex {
+        name: String,
+    },
+    Insert {
+        table: String,
+        columns: Option<Vec<String>>,
+        rows: Vec<Vec<Expr>>,
+    },
     Select {
         columns: SelectColumns,
         table: String,
@@ -18,14 +33,28 @@ pub enum Statement {
         order_by: Option<(String, bool)>,
         limit: Option<i64>,
     },
-    Update { table: String, assignments: Vec<(String, Expr)>, where_clause: Option<Expr> },
-    Delete { table: String, where_clause: Option<Expr> },
+    Update {
+        table: String,
+        assignments: Vec<(String, Expr)>,
+        where_clause: Option<Expr>,
+    },
+    Delete {
+        table: String,
+        where_clause: Option<Expr>,
+    },
     Begin,
     Commit,
     Rollback,
     // Auth & RLS DDL
-    CreateUser { username: String, password: String, role: Option<String> },
-    AlterTableRls { table: String, enabled: bool },
+    CreateUser {
+        username: String,
+        password: String,
+        role: Option<String>,
+    },
+    AlterTableRls {
+        table: String,
+        enabled: bool,
+    },
     CreatePolicy {
         name: String,
         table: String,
@@ -33,7 +62,10 @@ pub enum Statement {
         using_expr: Option<Expr>,
         with_check: Option<Expr>,
     },
-    DropPolicy { name: String, table: String },
+    DropPolicy {
+        name: String,
+        table: String,
+    },
     Explain(Box<Statement>),
 }
 
@@ -52,7 +84,10 @@ pub enum SelectItem {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableRef {
-    Table { name: String, alias: Option<String> },
+    Table {
+        name: String,
+        alias: Option<String>,
+    },
     Join {
         left: Box<TableRef>,
         right: Box<TableRef>,
@@ -80,17 +115,39 @@ pub struct ColumnDef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Column(String),
-    QualifiedColumn { table: String, column: String },
+    QualifiedColumn {
+        table: String,
+        column: String,
+    },
     IntLiteral(i64),
     StringLiteral(String),
     BoolLiteral(bool),
     Null,
-    BinaryOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
-    IsNull { expr: Box<Expr>, negated: bool },
-    InList { expr: Box<Expr>, list: Vec<Expr>, negated: bool },
-    Like { expr: Box<Expr>, pattern: String, negated: bool },
+    BinaryOp {
+        op: BinOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool,
+    },
+    InList {
+        expr: Box<Expr>,
+        list: Vec<Expr>,
+        negated: bool,
+    },
+    Like {
+        expr: Box<Expr>,
+        pattern: String,
+        negated: bool,
+    },
     Aggregate(AggregateFunc),
-    JsonExtract { expr: Box<Expr>, path: String, as_text: bool },
+    JsonExtract {
+        expr: Box<Expr>,
+        path: String,
+        as_text: bool,
+    },
     AuthUid,
 }
 
@@ -106,5 +163,12 @@ pub enum AggregateFunc {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinOp {
-    And, Or, Eq, NotEq, Lt, LtEq, Gt, GtEq,
+    And,
+    Or,
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
 }

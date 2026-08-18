@@ -1,7 +1,7 @@
 //! Wire protocol definitions, request/response models, and message framing for ChocoBase.
 
-use std::io;
 use serde::{Deserialize, Serialize};
+use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::engine::ExecResult;
@@ -60,8 +60,8 @@ pub async fn write_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     response: &Response,
 ) -> io::Result<()> {
-    let mut json = serde_json::to_vec(response)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut json =
+        serde_json::to_vec(response).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     json.push(b'\n');
     writer.write_all(&json).await?;
     writer.flush().await?;
@@ -73,8 +73,8 @@ pub async fn write_request<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     request: &Request,
 ) -> io::Result<()> {
-    let mut json = serde_json::to_vec(request)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut json =
+        serde_json::to_vec(request).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     json.push(b'\n');
     writer.write_all(&json).await?;
     writer.flush().await?;

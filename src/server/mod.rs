@@ -1,9 +1,9 @@
 //! Network server and protocol module for ChocoBase.
 
-pub mod protocol;
-pub mod session;
 pub mod listener;
 pub mod postgres_wire;
+pub mod protocol;
+pub mod session;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -76,7 +76,9 @@ impl Server {
         let listener = tokio::net::TcpListener::bind(config.bind_addr)
             .await
             .map_err(crate::error::StorageError::Io)?;
-        let local_addr = listener.local_addr().map_err(crate::error::StorageError::Io)?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(crate::error::StorageError::Io)?;
         let (shutdown_tx, _) = broadcast::channel(1);
         let shutdown_rx = shutdown_tx.subscribe();
         let session_db = db.clone();

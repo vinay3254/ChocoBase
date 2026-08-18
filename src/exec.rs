@@ -1,11 +1,11 @@
-pub mod scan;
+pub mod aggregate;
 pub mod filter;
-pub mod project;
-pub mod sort;
+pub mod join;
 pub mod limit;
 pub mod mutate;
-pub mod join;
-pub mod aggregate;
+pub mod project;
+pub mod scan;
+pub mod sort;
 
 use crate::error::ExecError;
 use crate::storage::pager::Pager;

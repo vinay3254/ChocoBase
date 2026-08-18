@@ -41,22 +41,40 @@ pub fn build_select_plan_with_context(
     let (pk_value, residual) = extract_pk_equality(where_clause, &pk_col);
 
     let (mut plan, residual): (Box<dyn Operator>, Option<Expr>) = if let Some(v) = pk_value {
-        (Box::new(TableSeek::new(schema.clone(), encode_key(&v))), residual)
-    } else if let Some((idx_schema, value, residual2)) = find_index_equality(residual.clone(), indexes) {
+        (
+            Box::new(TableSeek::new(schema.clone(), encode_key(&v))),
+            residual,
+        )
+    } else if let Some((idx_schema, value, residual2)) =
+        find_index_equality(residual.clone(), indexes)
+    {
         let prefix = encode_key(&value);
-        (Box::new(IndexSeek::new(schema.clone(), idx_schema.root_page, prefix)), residual2)
+        (
+            Box::new(IndexSeek::new(schema.clone(), idx_schema.root_page, prefix)),
+            residual2,
+        )
     } else {
         (Box::new(SeqScan::new(schema.clone())), residual)
     };
 
     if let Some(predicate) = residual {
-        plan = Box::new(Filter { input: plan, schema: schema.clone(), predicate, context: context.clone() });
+        plan = Box::new(Filter {
+            input: plan,
+            schema: schema.clone(),
+            predicate,
+            context: context.clone(),
+        });
     }
     if let Some((col, desc)) = order_by {
-        let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
+        let idx = schema
+            .column_index(&col)
+            .ok_or_else(|| PlanError::NoSuchColumn(col))?;
         plan = Box::new(Sort::new(plan, idx, desc));
     }
-    plan = Box::new(Project { input: plan, indices: projection_indices });
+    plan = Box::new(Project {
+        input: plan,
+        indices: projection_indices,
+    });
     if let Some(n) = limit {
         plan = Box::new(Limit::new(plan, n));
     }
@@ -92,7 +110,12 @@ pub fn build_table_ref_plan(
             let plan: Box<dyn Operator> = Box::new(SeqScan::new(base_schema));
             Ok((plan, schema))
         }
-        crate::sql::ast::TableRef::Join { left, right, join_type, condition } => {
+        crate::sql::ast::TableRef::Join {
+            left,
+            right,
+            join_type,
+            condition,
+        } => {
             let (left_plan, left_schema) = build_table_ref_plan(catalog, pager, left)?;
             let (right_plan, right_schema) = build_table_ref_plan(catalog, pager, right)?;
 
@@ -120,7 +143,10 @@ pub fn build_table_ref_plan(
     }
 }
 
-pub(crate) fn find_index_equality(where_clause: Option<Expr>, indexes: &[IndexSchema]) -> Option<(IndexSchema, Value, Option<Expr>)> {
+pub(crate) fn find_index_equality(
+    where_clause: Option<Expr>,
+    indexes: &[IndexSchema],
+) -> Option<(IndexSchema, Value, Option<Expr>)> {
     let expr = where_clause?;
     if contains_or(&expr) {
         return None;
@@ -132,7 +158,12 @@ pub(crate) fn find_index_equality(where_clause: Option<Expr>, indexes: &[IndexSc
     let mut remaining = Vec::new();
     for c in conjuncts {
         if matched.is_none() {
-            if let Expr::BinaryOp { op: BinOp::Eq, left, right } = &c {
+            if let Expr::BinaryOp {
+                op: BinOp::Eq,
+                left,
+                right,
+            } = &c
+            {
                 let candidate = match (left.as_ref(), right.as_ref()) {
                     (Expr::Column(name), lit) => indexes
                         .iter()
@@ -157,7 +188,11 @@ pub(crate) fn find_index_equality(where_clause: Option<Expr>, indexes: &[IndexSc
 
 fn split_and_conjuncts(expr: Expr, out: &mut Vec<Expr>) {
     match expr {
-        Expr::BinaryOp { op: BinOp::And, left, right } => {
+        Expr::BinaryOp {
+            op: BinOp::And,
+            left,
+            right,
+        } => {
             split_and_conjuncts(*left, out);
             split_and_conjuncts(*right, out);
         }
@@ -171,7 +206,11 @@ fn rebuild_and(mut conjuncts: Vec<Expr>) -> Option<Expr> {
     }
     let mut acc = conjuncts.remove(0);
     for c in conjuncts {
-        acc = Expr::BinaryOp { op: BinOp::And, left: Box::new(acc), right: Box::new(c) };
+        acc = Expr::BinaryOp {
+            op: BinOp::And,
+            left: Box::new(acc),
+            right: Box::new(c),
+        };
     }
     Some(acc)
 }
@@ -197,7 +236,10 @@ fn literal_value(expr: &Expr) -> Option<Value> {
 /// remaining predicate to apply as a residual filter). Only a top-level chain of
 /// `AND`s is analyzed; any `OR` anywhere disables the optimization entirely and
 /// the whole expression is returned as the residual filter.
-pub(crate) fn extract_pk_equality(where_clause: Option<Expr>, pk_col: &str) -> (Option<Value>, Option<Expr>) {
+pub(crate) fn extract_pk_equality(
+    where_clause: Option<Expr>,
+    pk_col: &str,
+) -> (Option<Value>, Option<Expr>) {
     let Some(expr) = where_clause else {
         return (None, None);
     };
@@ -211,7 +253,12 @@ pub(crate) fn extract_pk_equality(where_clause: Option<Expr>, pk_col: &str) -> (
     let mut remaining = Vec::new();
     for c in conjuncts {
         if pk_value.is_none() {
-            if let Expr::BinaryOp { op: BinOp::Eq, left, right } = &c {
+            if let Expr::BinaryOp {
+                op: BinOp::Eq,
+                left,
+                right,
+            } = &c
+            {
                 let matched = match (left.as_ref(), right.as_ref()) {
                     (Expr::Column(name), lit) if name == pk_col => literal_value(lit),
                     (lit, Expr::Column(name)) if name == pk_col => literal_value(lit),
@@ -242,13 +289,27 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let initial_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(initial_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(initial_root).unwrap());
 
         let mut schema = TableSchema {
             name: "t".into(),
             columns: vec![
-                Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true },
-                Column { name: "name".into(), ty: ColumnType::Text, not_null: true, is_primary_key: false },
+                Column {
+                    name: "id".into(),
+                    ty: ColumnType::Integer,
+                    not_null: true,
+                    is_primary_key: true,
+                },
+                Column {
+                    name: "name".into(),
+                    ty: ColumnType::Text,
+                    not_null: true,
+                    is_primary_key: false,
+                },
             ],
             root_page: initial_root,
             rls_enabled: false,
@@ -258,7 +319,11 @@ mod tests {
             let mut bt = crate::btree::tree::BTree::new(&mut pager, initial_root);
             for (id, name) in [(1, "a"), (2, "b"), (3, "c")] {
                 let row = vec![Value::Integer(id), Value::Text(name.into())];
-                bt.insert(&crate::types::value::encode_key(&Value::Integer(id)), &crate::types::row::encode_row(&schema, &row)).unwrap();
+                bt.insert(
+                    &crate::types::value::encode_key(&Value::Integer(id)),
+                    &crate::types::row::encode_row(&schema, &row),
+                )
+                .unwrap();
             }
             bt.root()
         };
@@ -269,13 +334,17 @@ mod tests {
             left: Box::new(Expr::Column("id".into())),
             right: Box::new(Expr::IntLiteral(1)),
         };
-        let mut plan = build_select_plan(&schema, &[], Some(predicate), vec![1], None, None).unwrap(); // project just "name"
+        let mut plan =
+            build_select_plan(&schema, &[], Some(predicate), vec![1], None, None).unwrap(); // project just "name"
 
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut pager).unwrap() {
             rows.push(row);
         }
-        assert_eq!(rows, vec![vec![Value::Text("b".into())], vec![Value::Text("c".into())]]);
+        assert_eq!(
+            rows,
+            vec![vec![Value::Text("b".into())], vec![Value::Text("c".into())]]
+        );
     }
 
     #[test]
@@ -283,11 +352,20 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let initial_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(initial_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(initial_root).unwrap());
 
         let mut schema = TableSchema {
             name: "t".into(),
-            columns: vec![Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true }],
+            columns: vec![Column {
+                name: "id".into(),
+                ty: ColumnType::Integer,
+                not_null: true,
+                is_primary_key: true,
+            }],
             root_page: initial_root,
             rls_enabled: false,
         };
@@ -295,7 +373,11 @@ mod tests {
             let mut bt = crate::btree::tree::BTree::new(&mut pager, initial_root);
             for i in 0..5000i64 {
                 let row = vec![Value::Integer(i)];
-                bt.insert(&crate::types::value::encode_key(&Value::Integer(i)), &crate::types::row::encode_row(&schema, &row)).unwrap();
+                bt.insert(
+                    &crate::types::value::encode_key(&Value::Integer(i)),
+                    &crate::types::row::encode_row(&schema, &row),
+                )
+                .unwrap();
             }
             bt.root()
         };
@@ -316,7 +398,8 @@ mod tests {
             right: Box::new(Expr::IntLiteral(2500)),
         };
         pager.reset_read_counter();
-        let mut plan = build_select_plan(&schema, &[], Some(predicate), vec![0], None, None).unwrap();
+        let mut plan =
+            build_select_plan(&schema, &[], Some(predicate), vec![0], None, None).unwrap();
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut pager).unwrap() {
             rows.push(row);

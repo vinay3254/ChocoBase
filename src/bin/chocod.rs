@@ -70,8 +70,12 @@ async fn main() -> ExitCode {
                 println!("Options:");
                 println!("  -b, --bind <ADDR:PORT>        TCP wire protocol bind address (default: 127.0.0.1:5433)");
                 println!("      --http-bind <ADDR:PORT>   HTTP REST & Studio bind address (default: 127.0.0.1:8080)");
-                println!("      --no-http                 Disable HTTP gateway and Studio dashboard");
-                println!("  -d, --db <PATH>               Path to database file (default: chocobase.db)");
+                println!(
+                    "      --no-http                 Disable HTTP gateway and Studio dashboard"
+                );
+                println!(
+                    "  -d, --db <PATH>               Path to database file (default: chocobase.db)"
+                );
                 println!("  -h, --help                    Print help message");
                 return ExitCode::SUCCESS;
             }
@@ -87,7 +91,10 @@ async fn main() -> ExitCode {
         }
     }
 
-    println!("Starting ChocoBase TCP wire server on {bind_addr} (db: {})", db_path.display());
+    println!(
+        "Starting ChocoBase TCP wire server on {bind_addr} (db: {})",
+        db_path.display()
+    );
     let config = ServerConfig::new(bind_addr, db_path.clone());
     let server = match Server::new(config) {
         Ok(s) => s,

@@ -1,7 +1,7 @@
+use crate::btree::node::{InternalEntry, InternalNode, LeafEntry, LeafNode};
 use crate::error::{BTreeError, StorageError};
 use crate::storage::page::{PAGE_TYPE_INTERNAL, PAGE_TYPE_LEAF};
 use crate::storage::pager::Pager;
-use crate::btree::node::{InternalNode, LeafNode, InternalEntry, LeafEntry};
 
 pub struct BTree<'a> {
     pager: &'a mut Pager,
@@ -43,7 +43,11 @@ impl<'a> BTree<'a> {
         let (_, leaf_no) = self.descend(key)?;
         let page = self.pager.get_page(leaf_no)?;
         let node = LeafNode::decode(page);
-        Ok(node.entries.iter().find(|e| e.key == key).map(|e| e.payload.clone()))
+        Ok(node
+            .entries
+            .iter()
+            .find(|e| e.key == key)
+            .map(|e| e.payload.clone()))
     }
 
     pub fn insert(&mut self, key: &[u8], payload: &[u8]) -> Result<(), BTreeError> {
@@ -64,7 +68,13 @@ impl<'a> BTree<'a> {
         }
 
         let pos = node.entries.partition_point(|e| e.key.as_slice() < key);
-        node.entries.insert(pos, LeafEntry { key: key.to_vec(), payload: payload.to_vec() });
+        node.entries.insert(
+            pos,
+            LeafEntry {
+                key: key.to_vec(),
+                payload: payload.to_vec(),
+            },
+        );
 
         if node.encoded_size() <= PAGE_SIZE {
             let page = self.pager.get_page_mut(leaf_no)?;
@@ -80,8 +90,14 @@ impl<'a> BTree<'a> {
         let right_no = self.pager.allocate_page()?;
         let separator = right_entries[0].key.clone();
 
-        let left_node = LeafNode { entries: left_entries, next_leaf: right_no };
-        let right_node = LeafNode { entries: right_entries, next_leaf: old_next };
+        let left_node = LeafNode {
+            entries: left_entries,
+            next_leaf: right_no,
+        };
+        let right_node = LeafNode {
+            entries: right_entries,
+            next_leaf: old_next,
+        };
 
         left_node.encode(self.pager.get_page_mut(leaf_no)?);
         right_node.encode(self.pager.get_page_mut(right_no)?);
@@ -102,7 +118,10 @@ impl<'a> BTree<'a> {
             None => {
                 let new_root_no = self.pager.allocate_page()?;
                 let new_root = InternalNode {
-                    entries: vec![InternalEntry { key: separator, left_child }],
+                    entries: vec![InternalEntry {
+                        key: separator,
+                        left_child,
+                    }],
                     rightmost_child: right_child,
                 };
                 new_root.encode(self.pager.get_page_mut(new_root_no)?);
@@ -115,11 +134,20 @@ impl<'a> BTree<'a> {
 
                 if let Some(i) = node.entries.iter().position(|e| e.left_child == left_child) {
                     node.entries[i].left_child = right_child;
-                    node.entries.insert(i, InternalEntry { key: separator, left_child });
+                    node.entries.insert(
+                        i,
+                        InternalEntry {
+                            key: separator,
+                            left_child,
+                        },
+                    );
                 } else {
                     debug_assert_eq!(node.rightmost_child, left_child);
                     node.rightmost_child = right_child;
-                    node.entries.push(InternalEntry { key: separator, left_child });
+                    node.entries.push(InternalEntry {
+                        key: separator,
+                        left_child,
+                    });
                 }
 
                 if node.encoded_size() <= PAGE_SIZE {
@@ -149,8 +177,14 @@ impl<'a> BTree<'a> {
         let left_rightmost = promote.left_child;
         let right_no = self.pager.allocate_page()?;
 
-        let right_node = InternalNode { entries: right_entries, rightmost_child: old_rightmost };
-        let left_node = InternalNode { entries: node.entries, rightmost_child: left_rightmost };
+        let right_node = InternalNode {
+            entries: right_entries,
+            rightmost_child: old_rightmost,
+        };
+        let left_node = InternalNode {
+            entries: node.entries,
+            rightmost_child: left_rightmost,
+        };
 
         left_node.encode(self.pager.get_page_mut(parent_no)?);
         right_node.encode(self.pager.get_page_mut(right_no)?);
@@ -166,7 +200,11 @@ impl<'a> BTree<'a> {
                 crate::storage::page::PAGE_TYPE_LEAF => break,
                 crate::storage::page::PAGE_TYPE_INTERNAL => {
                     let node = InternalNode::decode(page);
-                    current = node.entries.first().map(|e| e.left_child).unwrap_or(node.rightmost_child);
+                    current = node
+                        .entries
+                        .first()
+                        .map(|e| e.left_child)
+                        .unwrap_or(node.rightmost_child);
                 }
                 t => {
                     return Err(BTreeError::Storage(StorageError::CorruptPage(
@@ -178,7 +216,11 @@ impl<'a> BTree<'a> {
         }
         let page = self.pager.get_page(current)?;
         let node = LeafNode::decode(page);
-        Ok(crate::btree::cursor::Cursor::from_leaf(node.entries, 0, node.next_leaf))
+        Ok(crate::btree::cursor::Cursor::from_leaf(
+            node.entries,
+            0,
+            node.next_leaf,
+        ))
     }
 
     pub fn cursor_seek(&mut self, key: &[u8]) -> Result<crate::btree::cursor::Cursor, BTreeError> {
@@ -186,14 +228,23 @@ impl<'a> BTree<'a> {
         let page = self.pager.get_page(leaf_no)?;
         let node = LeafNode::decode(page);
         let start_idx = node.entries.partition_point(|e| e.key.as_slice() < key);
-        Ok(crate::btree::cursor::Cursor::from_leaf(node.entries, start_idx, node.next_leaf))
+        Ok(crate::btree::cursor::Cursor::from_leaf(
+            node.entries,
+            start_idx,
+            node.next_leaf,
+        ))
     }
 
     pub fn check_invariants(&mut self) -> Result<(), String> {
         self.check_node(self.root, None, None).map(|_| ())
     }
 
-    fn check_node(&mut self, page_no: u32, lower: Option<&[u8]>, upper: Option<&[u8]>) -> Result<usize, String> {
+    fn check_node(
+        &mut self,
+        page_no: u32,
+        lower: Option<&[u8]>,
+        upper: Option<&[u8]>,
+    ) -> Result<usize, String> {
         let page = self.pager.get_page(page_no).map_err(|e| e.to_string())?;
         match page.page_type() {
             crate::storage::page::PAGE_TYPE_LEAF => {
@@ -228,7 +279,9 @@ impl<'a> BTree<'a> {
                 }
                 depths.push(self.check_node(node.rightmost_child, lo, upper)?);
                 if depths.iter().any(|&d| d != depths[0]) {
-                    return Err(format!("internal {page_no}: children at unequal depth {depths:?}"));
+                    return Err(format!(
+                        "internal {page_no}: children at unequal depth {depths:?}"
+                    ));
                 }
                 Ok(depths[0] + 1)
             }
@@ -256,7 +309,11 @@ impl<'a> BTree<'a> {
         Ok(true)
     }
 
-    fn find_siblings(&mut self, parent_no: u32, child_no: u32) -> Result<(Option<u32>, Option<u32>), BTreeError> {
+    fn find_siblings(
+        &mut self,
+        parent_no: u32,
+        child_no: u32,
+    ) -> Result<(Option<u32>, Option<u32>), BTreeError> {
         let page = self.pager.get_page(parent_no)?;
         let parent = InternalNode::decode(page);
         let children: Vec<u32> = parent
@@ -265,16 +322,36 @@ impl<'a> BTree<'a> {
             .map(|e| e.left_child)
             .chain(std::iter::once(parent.rightmost_child))
             .collect();
-        let idx = children.iter().position(|&c| c == child_no).expect("child must belong to parent");
-        let left = if idx > 0 { Some(children[idx - 1]) } else { None };
-        let right = if idx + 1 < children.len() { Some(children[idx + 1]) } else { None };
+        let idx = children
+            .iter()
+            .position(|&c| c == child_no)
+            .expect("child must belong to parent");
+        let left = if idx > 0 {
+            Some(children[idx - 1])
+        } else {
+            None
+        };
+        let right = if idx + 1 < children.len() {
+            Some(children[idx + 1])
+        } else {
+            None
+        };
         Ok((left, right))
     }
 
-    fn update_separator(&mut self, parent_no: u32, left_child: u32, new_key: Vec<u8>) -> Result<(), BTreeError> {
+    fn update_separator(
+        &mut self,
+        parent_no: u32,
+        left_child: u32,
+        new_key: Vec<u8>,
+    ) -> Result<(), BTreeError> {
         let page = self.pager.get_page(parent_no)?;
         let mut parent = InternalNode::decode(page);
-        let i = parent.entries.iter().position(|e| e.left_child == left_child).unwrap();
+        let i = parent
+            .entries
+            .iter()
+            .position(|e| e.left_child == left_child)
+            .unwrap();
         parent.entries[i].key = new_key;
         parent.encode(self.pager.get_page_mut(parent_no)?);
         Ok(())
@@ -309,7 +386,12 @@ impl<'a> BTree<'a> {
         Ok(())
     }
 
-    fn borrow_from_right_leaf(&mut self, parent_no: u32, node_no: u32, right_no: u32) -> Result<(), BTreeError> {
+    fn borrow_from_right_leaf(
+        &mut self,
+        parent_no: u32,
+        node_no: u32,
+        right_no: u32,
+    ) -> Result<(), BTreeError> {
         let mut node = LeafNode::decode(self.pager.get_page(node_no)?);
         let mut right = LeafNode::decode(self.pager.get_page(right_no)?);
         let moved = right.entries.remove(0);
@@ -320,7 +402,12 @@ impl<'a> BTree<'a> {
         self.update_separator(parent_no, node_no, new_separator)
     }
 
-    fn borrow_from_left_leaf(&mut self, parent_no: u32, left_no: u32, node_no: u32) -> Result<(), BTreeError> {
+    fn borrow_from_left_leaf(
+        &mut self,
+        parent_no: u32,
+        left_no: u32,
+        node_no: u32,
+    ) -> Result<(), BTreeError> {
         let mut left = LeafNode::decode(self.pager.get_page(left_no)?);
         let mut node = LeafNode::decode(self.pager.get_page(node_no)?);
         let moved = left.entries.pop().unwrap();
@@ -331,7 +418,13 @@ impl<'a> BTree<'a> {
         self.update_separator(parent_no, left_no, new_separator)
     }
 
-    fn merge_leaves(&mut self, path: Vec<u32>, parent_no: u32, left_no: u32, right_no: u32) -> Result<(), BTreeError> {
+    fn merge_leaves(
+        &mut self,
+        path: Vec<u32>,
+        parent_no: u32,
+        left_no: u32,
+        right_no: u32,
+    ) -> Result<(), BTreeError> {
         let mut left = LeafNode::decode(self.pager.get_page(left_no)?);
         let right = LeafNode::decode(self.pager.get_page(right_no)?);
         left.entries.extend(right.entries);
@@ -341,12 +434,20 @@ impl<'a> BTree<'a> {
 
         let page = self.pager.get_page(parent_no)?;
         let mut parent = InternalNode::decode(page);
-        let i = parent.entries.iter().position(|e| e.left_child == left_no).unwrap();
+        let i = parent
+            .entries
+            .iter()
+            .position(|e| e.left_child == left_no)
+            .unwrap();
         parent.entries.remove(i);
         if parent.rightmost_child == right_no {
             parent.rightmost_child = left_no;
         } else {
-            let j = parent.entries.iter().position(|e| e.left_child == right_no).unwrap();
+            let j = parent
+                .entries
+                .iter()
+                .position(|e| e.left_child == right_no)
+                .unwrap();
             parent.entries[j].left_child = left_no;
         }
         parent.encode(self.pager.get_page_mut(parent_no)?);
@@ -390,16 +491,28 @@ impl<'a> BTree<'a> {
         Ok(())
     }
 
-    fn borrow_from_right_internal(&mut self, parent_no: u32, node_no: u32, right_no: u32) -> Result<(), BTreeError> {
+    fn borrow_from_right_internal(
+        &mut self,
+        parent_no: u32,
+        node_no: u32,
+        right_no: u32,
+    ) -> Result<(), BTreeError> {
         let mut node = InternalNode::decode(self.pager.get_page(node_no)?);
         let mut right = InternalNode::decode(self.pager.get_page(right_no)?);
         let page = self.pager.get_page(parent_no)?;
         let mut parent = InternalNode::decode(page);
-        let sep_idx = parent.entries.iter().position(|e| e.left_child == node_no).unwrap();
+        let sep_idx = parent
+            .entries
+            .iter()
+            .position(|e| e.left_child == node_no)
+            .unwrap();
         let sep_key = parent.entries[sep_idx].key.clone();
 
         let moved = right.entries.remove(0);
-        node.entries.push(InternalEntry { key: sep_key, left_child: node.rightmost_child });
+        node.entries.push(InternalEntry {
+            key: sep_key,
+            left_child: node.rightmost_child,
+        });
         node.rightmost_child = moved.left_child;
         parent.entries[sep_idx].key = moved.key;
 
@@ -409,19 +522,34 @@ impl<'a> BTree<'a> {
         Ok(())
     }
 
-    fn borrow_from_left_internal(&mut self, parent_no: u32, left_no: u32, node_no: u32) -> Result<(), BTreeError> {
+    fn borrow_from_left_internal(
+        &mut self,
+        parent_no: u32,
+        left_no: u32,
+        node_no: u32,
+    ) -> Result<(), BTreeError> {
         let mut left = InternalNode::decode(self.pager.get_page(left_no)?);
         let mut node = InternalNode::decode(self.pager.get_page(node_no)?);
         let page = self.pager.get_page(parent_no)?;
         let mut parent = InternalNode::decode(page);
-        let sep_idx = parent.entries.iter().position(|e| e.left_child == left_no).unwrap();
+        let sep_idx = parent
+            .entries
+            .iter()
+            .position(|e| e.left_child == left_no)
+            .unwrap();
         let sep_key = parent.entries[sep_idx].key.clone();
 
         let moved_child = left.rightmost_child;
         let last_entry = left.entries.pop().unwrap();
         left.rightmost_child = last_entry.left_child;
 
-        node.entries.insert(0, InternalEntry { key: sep_key, left_child: moved_child });
+        node.entries.insert(
+            0,
+            InternalEntry {
+                key: sep_key,
+                left_child: moved_child,
+            },
+        );
         parent.entries[sep_idx].key = last_entry.key;
 
         left.encode(self.pager.get_page_mut(left_no)?);
@@ -430,15 +558,28 @@ impl<'a> BTree<'a> {
         Ok(())
     }
 
-    fn merge_internal(&mut self, path: Vec<u32>, parent_no: u32, left_no: u32, right_no: u32) -> Result<(), BTreeError> {
+    fn merge_internal(
+        &mut self,
+        path: Vec<u32>,
+        parent_no: u32,
+        left_no: u32,
+        right_no: u32,
+    ) -> Result<(), BTreeError> {
         let mut left = InternalNode::decode(self.pager.get_page(left_no)?);
         let right = InternalNode::decode(self.pager.get_page(right_no)?);
         let page = self.pager.get_page(parent_no)?;
         let mut parent = InternalNode::decode(page);
-        let sep_idx = parent.entries.iter().position(|e| e.left_child == left_no).unwrap();
+        let sep_idx = parent
+            .entries
+            .iter()
+            .position(|e| e.left_child == left_no)
+            .unwrap();
         let sep_key = parent.entries[sep_idx].key.clone();
 
-        left.entries.push(InternalEntry { key: sep_key, left_child: left.rightmost_child });
+        left.entries.push(InternalEntry {
+            key: sep_key,
+            left_child: left.rightmost_child,
+        });
         left.entries.extend(right.entries);
         left.rightmost_child = right.rightmost_child;
         left.encode(self.pager.get_page_mut(left_no)?);
@@ -448,7 +589,11 @@ impl<'a> BTree<'a> {
         if parent.rightmost_child == right_no {
             parent.rightmost_child = left_no;
         } else {
-            let j = parent.entries.iter().position(|e| e.left_child == right_no).unwrap();
+            let j = parent
+                .entries
+                .iter()
+                .position(|e| e.left_child == right_no)
+                .unwrap();
             parent.entries[j].left_child = left_no;
         }
         parent.encode(self.pager.get_page_mut(parent_no)?);
@@ -466,7 +611,10 @@ impl<'a> BTree<'a> {
         let page = match self.pager.get_page(page_no) {
             Ok(p) => p.clone(),
             Err(e) => {
-                out.push_str(&format!("{}page {page_no}: error reading page: {e}\n", "  ".repeat(depth)));
+                out.push_str(&format!(
+                    "{}page {page_no}: error reading page: {e}\n",
+                    "  ".repeat(depth)
+                ));
                 return;
             }
         };
@@ -474,7 +622,10 @@ impl<'a> BTree<'a> {
         match page.page_type() {
             crate::storage::page::PAGE_TYPE_LEAF => {
                 let node = LeafNode::decode(&page);
-                out.push_str(&format!("{indent}leaf page {page_no}: {} entries\n", node.entries.len()));
+                out.push_str(&format!(
+                    "{indent}leaf page {page_no}: {} entries\n",
+                    node.entries.len()
+                ));
             }
             crate::storage::page::PAGE_TYPE_INTERNAL => {
                 let node = InternalNode::decode(&page);
@@ -496,8 +647,8 @@ impl<'a> BTree<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use crate::btree::node::{InternalEntry, LeafEntry};
+    use tempfile::NamedTempFile;
 
     fn two_level_tree() -> (Pager, u32) {
         let file = NamedTempFile::new().unwrap();
@@ -507,19 +658,28 @@ mod tests {
         let root = pager.allocate_page().unwrap();
 
         let left_node = LeafNode {
-            entries: vec![LeafEntry { key: vec![1], payload: vec![b'a'] }],
+            entries: vec![LeafEntry {
+                key: vec![1],
+                payload: vec![b'a'],
+            }],
             next_leaf: right,
         };
         left_node.encode(pager.get_page_mut(left).unwrap());
 
         let right_node = LeafNode {
-            entries: vec![LeafEntry { key: vec![5], payload: vec![b'b'] }],
+            entries: vec![LeafEntry {
+                key: vec![5],
+                payload: vec![b'b'],
+            }],
             next_leaf: 0,
         };
         right_node.encode(pager.get_page_mut(right).unwrap());
 
         let root_node = InternalNode {
-            entries: vec![InternalEntry { key: vec![5], left_child: left }],
+            entries: vec![InternalEntry {
+                key: vec![5],
+                left_child: left,
+            }],
             rightmost_child: right,
         };
         root_node.encode(pager.get_page_mut(root).unwrap());
@@ -547,7 +707,11 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(root).unwrap());
         pager.flush().unwrap();
         (pager, root)
     }
@@ -561,7 +725,10 @@ mod tests {
         }
         let dump = bt.dump();
         assert!(dump.contains("leaf"));
-        assert!(dump.contains("internal"), "400 small keys must have split into a multi-level tree");
+        assert!(
+            dump.contains("internal"),
+            "400 small keys must have split into a multi-level tree"
+        );
     }
 
     #[test]
@@ -651,7 +818,11 @@ mod tests {
             let key = format!("{i:06}{}", "x".repeat(700)).into_bytes();
             bt.insert(&key, b"v").unwrap();
         }
-        assert_ne!(bt.root(), root, "enough inserts must force at least one split");
+        assert_ne!(
+            bt.root(),
+            root,
+            "enough inserts must force at least one split"
+        );
         for i in 0..100i32 {
             let key = format!("{i:06}{}", "x".repeat(700)).into_bytes();
             assert_eq!(bt.search(&key).unwrap(), Some(b"v".to_vec()));
@@ -669,8 +840,8 @@ mod tests {
         bt.check_invariants().unwrap();
     }
 
-    use proptest::prelude::*;
     use proptest::collection::vec as pvec;
+    use proptest::prelude::*;
 
     proptest! {
         #[test]

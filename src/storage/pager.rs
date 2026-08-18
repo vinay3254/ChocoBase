@@ -84,7 +84,9 @@ impl Pager {
 
     pub fn begin_transaction(&mut self) -> Result<(), StorageError> {
         if self.in_transaction {
-            return Err(StorageError::CorruptJournal("transaction already in progress".into()));
+            return Err(StorageError::CorruptJournal(
+                "transaction already in progress".into(),
+            ));
         }
         self.orig_page_count = self.header.page_count;
         self.journal = Some(Journal::create(&self.path, self.orig_page_count)?);
@@ -159,14 +161,16 @@ impl Pager {
 
     fn read_page_from_disk(&mut self, no: u32) -> Result<Page, StorageError> {
         let mut buf = [0u8; PAGE_SIZE];
-        self.file.seek(SeekFrom::Start(no as u64 * PAGE_SIZE as u64))?;
+        self.file
+            .seek(SeekFrom::Start(no as u64 * PAGE_SIZE as u64))?;
         self.file.read_exact(&mut buf)?;
         Ok(Page { data: buf })
     }
 
     fn write_page_to_disk(&mut self, no: u32) -> Result<(), StorageError> {
         let page = self.cache.get(&no).expect("dirty page must be cached");
-        self.file.seek(SeekFrom::Start(no as u64 * PAGE_SIZE as u64))?;
+        self.file
+            .seek(SeekFrom::Start(no as u64 * PAGE_SIZE as u64))?;
         self.file.write_all(&page.data)?;
         Ok(())
     }
@@ -229,7 +233,10 @@ impl Pager {
         let no = if self.header.freelist_head != 0 {
             let free_no = self.header.freelist_head;
             self.ensure_loaded(free_no)?;
-            if self.in_transaction && !self.journaled_pages.contains(&free_no) && free_no < self.orig_page_count {
+            if self.in_transaction
+                && !self.journaled_pages.contains(&free_no)
+                && free_no < self.orig_page_count
+            {
                 let page_copy = self.cache.get(&free_no).unwrap().clone();
                 if let Some(jnl) = &mut self.journal {
                     jnl.append_page(free_no, &page_copy)?;
@@ -244,7 +251,8 @@ impl Pager {
             let no = self.header.page_count;
             self.header.page_count += 1;
             self.flush_header()?;
-            self.file.set_len(self.header.page_count as u64 * PAGE_SIZE as u64)?;
+            self.file
+                .set_len(self.header.page_count as u64 * PAGE_SIZE as u64)?;
             no
         };
         self.evict_if_needed()?;
@@ -345,7 +353,10 @@ mod tests {
         let p3 = pager.allocate_page().unwrap();
         assert_eq!(p3, 2, "freed page 2 should be reused");
         assert_eq!(pager.header.freelist_head, 0);
-        assert_eq!(pager.header.page_count, 3, "page count shouldn't have grown");
+        assert_eq!(
+            pager.header.page_count, 3,
+            "page count shouldn't have grown"
+        );
     }
 
     #[test]
@@ -382,7 +393,8 @@ mod tests {
     }
 
     #[test]
-    fn injected_write_failure_during_transaction_mutation_surfaces_clean_error_and_does_not_leak_to_db_file() {
+    fn injected_write_failure_during_transaction_mutation_surfaces_clean_error_and_does_not_leak_to_db_file(
+    ) {
         use crate::storage::journal::{journal_path_for, JournalWriter};
         use std::io::{Seek, SeekFrom, Write};
 
@@ -437,20 +449,29 @@ mod tests {
 
         // 2. Inject a failing writer that succeeds writing the 64-byte header but fails on record append
         let jnl_path = journal_path_for(path);
-        let jnl_file = OpenOptions::new().read(true).write(true).open(&jnl_path).unwrap();
+        let jnl_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&jnl_path)
+            .unwrap();
         let failing_writer = FailingWriter {
             inner: jnl_file,
             allow_bytes: crate::storage::journal::JOURNAL_HEADER_SIZE,
             written_bytes: 0,
         };
-        let injected_journal = Journal::new_with_writer(Box::new(failing_writer), jnl_path, pager.header.page_count).unwrap();
+        let injected_journal =
+            Journal::new_with_writer(Box::new(failing_writer), jnl_path, pager.header.page_count)
+                .unwrap();
         pager.journal = Some(injected_journal);
 
         // 3. Attempt to mutate page 1: must cleanly return Err(StorageError::Io) with StorageFull
         let res = pager.get_page_mut(p1);
         match res {
             Err(StorageError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::StorageFull),
-            other => panic!("expected StorageError::Io(StorageFull), got {:?}", other.is_err()),
+            other => panic!(
+                "expected StorageError::Io(StorageFull), got {:?}",
+                other.is_err()
+            ),
         }
 
         // 4. Verify dirty set does NOT contain p1 and page was not mutated in live db file

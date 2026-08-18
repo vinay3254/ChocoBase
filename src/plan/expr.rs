@@ -4,7 +4,12 @@ use crate::types::schema::TableSchema;
 use crate::types::value::{sql_cmp, Value};
 
 pub fn eval(expr: &Expr, schema: &TableSchema, row: &[Value]) -> Result<Value, PlanError> {
-    eval_with_context(expr, schema, row, &crate::auth::ExecutionContext::anonymous())
+    eval_with_context(
+        expr,
+        schema,
+        row,
+        &crate::auth::ExecutionContext::anonymous(),
+    )
 }
 
 pub fn eval_with_context(
@@ -19,7 +24,9 @@ pub fn eval_with_context(
             None => Ok(Value::Null),
         },
         Expr::Column(name) => {
-            let idx = schema.column_index(name).ok_or_else(|| PlanError::NoSuchColumn(name.clone()))?;
+            let idx = schema
+                .column_index(name)
+                .ok_or_else(|| PlanError::NoSuchColumn(name.clone()))?;
             Ok(row[idx].clone())
         }
         Expr::QualifiedColumn { table, column } => {
@@ -44,7 +51,11 @@ pub fn eval_with_context(
             let r = eval_with_context(right, schema, row, ctx)?;
             Ok(eval_binop(*op, &l, &r))
         }
-        Expr::InList { expr, list, negated } => {
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
             let target = eval_with_context(expr, schema, row, ctx)?;
             if matches!(target, Value::Null) {
                 return Ok(Value::Null);
@@ -59,7 +70,11 @@ pub fn eval_with_context(
             }
             Ok(Value::Boolean(if *negated { !found } else { found }))
         }
-        Expr::Like { expr, pattern, negated } => {
+        Expr::Like {
+            expr,
+            pattern,
+            negated,
+        } => {
             let val = eval_with_context(expr, schema, row, ctx)?;
             let text = match &val {
                 Value::Text(s) => s.as_str(),
@@ -74,7 +89,11 @@ pub fn eval_with_context(
         Expr::Aggregate(_) => Err(PlanError::InvalidExpression(
             "aggregate functions cannot be evaluated directly in row context".into(),
         )),
-        Expr::JsonExtract { expr, path, as_text } => {
+        Expr::JsonExtract {
+            expr,
+            path,
+            as_text,
+        } => {
             let val = eval_with_context(expr, schema, row, ctx)?;
             let json_str = match &val {
                 Value::Json(s) | Value::Text(s) => s.as_str(),
@@ -87,7 +106,9 @@ pub fn eval_with_context(
                 Err(_) => return Ok(Value::Null),
             };
 
-            let normalized_path = path.strip_prefix("$.").unwrap_or(path.strip_prefix('$').unwrap_or(path.as_str()));
+            let normalized_path = path
+                .strip_prefix("$.")
+                .unwrap_or(path.strip_prefix('$').unwrap_or(path.as_str()));
             let mut current = &parsed;
             if !normalized_path.is_empty() {
                 for segment in normalized_path.split('.') {
@@ -199,8 +220,18 @@ mod tests {
         TableSchema {
             name: "t".into(),
             columns: vec![
-                Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true },
-                Column { name: "name".into(), ty: ColumnType::Text, not_null: false, is_primary_key: false },
+                Column {
+                    name: "id".into(),
+                    ty: ColumnType::Integer,
+                    not_null: true,
+                    is_primary_key: true,
+                },
+                Column {
+                    name: "name".into(),
+                    ty: ColumnType::Text,
+                    not_null: false,
+                    is_primary_key: false,
+                },
             ],
             root_page: 0,
             rls_enabled: false,
@@ -210,13 +241,19 @@ mod tests {
     #[test]
     fn evaluates_column_reference() {
         let row = vec![Value::Integer(7), Value::Text("x".into())];
-        assert_eq!(eval(&Expr::Column("id".into()), &schema(), &row).unwrap(), Value::Integer(7));
+        assert_eq!(
+            eval(&Expr::Column("id".into()), &schema(), &row).unwrap(),
+            Value::Integer(7)
+        );
     }
 
     #[test]
     fn unknown_column_errors() {
         let row = vec![Value::Integer(7), Value::Text("x".into())];
-        assert!(matches!(eval(&Expr::Column("nope".into()), &schema(), &row), Err(PlanError::NoSuchColumn(_))));
+        assert!(matches!(
+            eval(&Expr::Column("nope".into()), &schema(), &row),
+            Err(PlanError::NoSuchColumn(_))
+        ));
     }
 
     #[test]
@@ -244,10 +281,22 @@ mod tests {
     #[test]
     fn is_null_and_is_not_null() {
         let row = vec![Value::Integer(7), Value::Null];
-        let is_null = Expr::IsNull { expr: Box::new(Expr::Column("name".into())), negated: false };
-        let is_not_null = Expr::IsNull { expr: Box::new(Expr::Column("name".into())), negated: true };
-        assert_eq!(eval(&is_null, &schema(), &row).unwrap(), Value::Boolean(true));
-        assert_eq!(eval(&is_not_null, &schema(), &row).unwrap(), Value::Boolean(false));
+        let is_null = Expr::IsNull {
+            expr: Box::new(Expr::Column("name".into())),
+            negated: false,
+        };
+        let is_not_null = Expr::IsNull {
+            expr: Box::new(Expr::Column("name".into())),
+            negated: true,
+        };
+        assert_eq!(
+            eval(&is_null, &schema(), &row).unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            eval(&is_not_null, &schema(), &row).unwrap(),
+            Value::Boolean(false)
+        );
     }
 
     #[test]
@@ -258,6 +307,9 @@ mod tests {
             left: Box::new(Expr::BoolLiteral(true)),
             right: Box::new(Expr::BoolLiteral(false)),
         };
-        assert_eq!(eval(&and_expr, &schema(), &row).unwrap(), Value::Boolean(false));
+        assert_eq!(
+            eval(&and_expr, &schema(), &row).unwrap(),
+            Value::Boolean(false)
+        );
     }
 }

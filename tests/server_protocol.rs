@@ -98,7 +98,9 @@ async fn server_handles_multiple_concurrent_tcp_clients() {
             for i in 0..ops_per_client {
                 let id = client_id * ops_per_client + i;
                 let sql = format!("INSERT INTO metrics (id, val) VALUES ({id}, {i})");
-                write_request(&mut stream, &Request::Query { sql }).await.unwrap();
+                write_request(&mut stream, &Request::Query { sql })
+                    .await
+                    .unwrap();
                 let resp = read_response(&mut stream, &mut buf).await.unwrap().unwrap();
                 assert_eq!(resp, Response::Result(ExecResult::Modified(1)));
             }
@@ -120,7 +122,10 @@ async fn server_handles_multiple_concurrent_tcp_clients() {
     )
     .await
     .unwrap();
-    let resp = read_response(&mut verify_stream, &mut buf).await.unwrap().unwrap();
+    let resp = read_response(&mut verify_stream, &mut buf)
+        .await
+        .unwrap()
+        .unwrap();
     match resp {
         Response::Result(ExecResult::Rows { rows, .. }) => {
             assert_eq!(rows.len(), clients * ops_per_client);
@@ -150,7 +155,14 @@ async fn server_cleans_up_locks_when_client_disconnects_abruptly() {
         .unwrap();
         let _ = read_response(&mut stream, &mut buf).await.unwrap();
 
-        write_request(&mut stream, &Request::Query { sql: "BEGIN".into() }).await.unwrap();
+        write_request(
+            &mut stream,
+            &Request::Query {
+                sql: "BEGIN".into(),
+            },
+        )
+        .await
+        .unwrap();
         let _ = read_response(&mut stream, &mut buf).await.unwrap();
 
         write_request(
@@ -180,12 +192,25 @@ async fn server_cleans_up_locks_when_client_disconnects_abruptly() {
     )
     .await
     .unwrap();
-    let resp = read_response(&mut stream2, &mut buf2).await.unwrap().unwrap();
+    let resp = read_response(&mut stream2, &mut buf2)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(resp, Response::Result(ExecResult::Modified(1)));
 
     // Verify row 1 from disconnected Client 1 was rolled back and ONLY row 2 exists
-    write_request(&mut stream2, &Request::Query { sql: "SELECT id FROM t".into() }).await.unwrap();
-    let resp2 = read_response(&mut stream2, &mut buf2).await.unwrap().unwrap();
+    write_request(
+        &mut stream2,
+        &Request::Query {
+            sql: "SELECT id FROM t".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let resp2 = read_response(&mut stream2, &mut buf2)
+        .await
+        .unwrap()
+        .unwrap();
     match resp2 {
         Response::Result(ExecResult::Rows { rows, .. }) => {
             assert_eq!(rows, vec![vec![Value::Integer(2)]]);

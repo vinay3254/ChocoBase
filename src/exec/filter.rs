@@ -20,7 +20,12 @@ impl Filter {
         predicate: Expr,
         context: crate::auth::ExecutionContext,
     ) -> Self {
-        Self { input, schema, predicate, context }
+        Self {
+            input,
+            schema,
+            predicate,
+            context,
+        }
     }
 }
 
@@ -63,7 +68,12 @@ mod tests {
 
         let schema = TableSchema {
             name: "t".into(),
-            columns: vec![Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true }],
+            columns: vec![Column {
+                name: "id".into(),
+                ty: ColumnType::Integer,
+                not_null: true,
+                is_primary_key: true,
+            }],
             root_page: 0,
             rls_enabled: false,
         };

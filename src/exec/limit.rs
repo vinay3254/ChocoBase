@@ -10,7 +10,10 @@ pub struct Limit {
 
 impl Limit {
     pub fn new(input: Box<dyn Operator>, n: i64) -> Self {
-        Limit { input, remaining: n }
+        Limit {
+            input,
+            remaining: n,
+        }
     }
 }
 
@@ -38,7 +41,14 @@ mod tests {
 
     #[test]
     fn stops_after_n_rows() {
-        let input = Fixed(vec![vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]].into_iter());
+        let input = Fixed(
+            vec![
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+                vec![Value::Integer(3)],
+            ]
+            .into_iter(),
+        );
         let mut limit = Limit::new(Box::new(input), 2);
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();

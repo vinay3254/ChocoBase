@@ -39,13 +39,19 @@ pub fn run(mut db: Database) {
     let mut buffer = String::new();
 
     loop {
-        let prompt = if buffer.is_empty() { "dbengine> " } else { "     ...> " };
+        let prompt = if buffer.is_empty() {
+            "dbengine> "
+        } else {
+            "     ...> "
+        };
         match rl.readline(prompt) {
             Ok(line) => {
                 let _ = rl.add_history_entry(line.as_str());
                 let trimmed = line.trim();
 
-                if buffer.is_empty() && (trimmed.starts_with('.') || trimmed.starts_with("--") || trimmed.is_empty()) {
+                if buffer.is_empty()
+                    && (trimmed.starts_with('.') || trimmed.starts_with("--") || trimmed.is_empty())
+                {
                     if trimmed == ".exit" {
                         break;
                     }

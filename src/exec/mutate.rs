@@ -36,7 +36,9 @@ pub fn insert_row(
 
     let mut new_index_roots = Vec::new();
     for idx in indexes {
-        let col_idx = schema.column_index(&idx.column).expect("index column must exist in table schema");
+        let col_idx = schema
+            .column_index(&idx.column)
+            .expect("index column must exist in table schema");
         let idx_key = encode_composite_key(&[row[col_idx].clone(), row[pk_idx].clone()]);
         let mut ibt = BTree::new(pager, idx.root_page);
         ibt.insert(&idx_key, &[])?;
@@ -59,7 +61,9 @@ pub fn delete_row(
 
     let mut new_index_roots = Vec::new();
     for idx in indexes {
-        let col_idx = schema.column_index(&idx.column).expect("index column must exist in table schema");
+        let col_idx = schema
+            .column_index(&idx.column)
+            .expect("index column must exist in table schema");
         let idx_key = encode_composite_key(&[row[col_idx].clone(), row[pk_idx].clone()]);
         let mut ibt = BTree::new(pager, idx.root_page);
         ibt.delete(&idx_key)?;
@@ -75,7 +79,8 @@ pub fn update_row(
     old_row: &[Value],
     new_row: &[Value],
 ) -> Result<(u32, Vec<(String, u32)>), ExecError> {
-    let (table_root_after_delete, index_roots_after_delete) = delete_row(pager, schema, indexes, old_row)?;
+    let (table_root_after_delete, index_roots_after_delete) =
+        delete_row(pager, schema, indexes, old_row)?;
 
     let mut schema_after_delete = schema.clone();
     schema_after_delete.root_page = table_root_after_delete;
@@ -83,7 +88,10 @@ pub fn update_row(
         .iter()
         .cloned()
         .map(|mut idx| {
-            if let Some((_, root)) = index_roots_after_delete.iter().find(|(name, _)| name == &idx.name) {
+            if let Some((_, root)) = index_roots_after_delete
+                .iter()
+                .find(|(name, _)| name == &idx.name)
+            {
                 idx.root_page = *root;
             }
             idx
@@ -105,8 +113,18 @@ mod tests {
         TableSchema {
             name: "t".into(),
             columns: vec![
-                Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true },
-                Column { name: "name".into(), ty: ColumnType::Text, not_null: true, is_primary_key: false },
+                Column {
+                    name: "id".into(),
+                    ty: ColumnType::Integer,
+                    not_null: true,
+                    is_primary_key: true,
+                },
+                Column {
+                    name: "name".into(),
+                    ty: ColumnType::Text,
+                    not_null: true,
+                    is_primary_key: false,
+                },
             ],
             root_page: root,
             rls_enabled: false,
@@ -118,16 +136,32 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(root).unwrap());
         let s = schema(root);
 
-        let (new_root, new_index_roots) = insert_row(&mut pager, &s, &[], &[Value::Integer(1), Value::Text("a".into())]).unwrap();
+        let (new_root, new_index_roots) = insert_row(
+            &mut pager,
+            &s,
+            &[],
+            &[Value::Integer(1), Value::Text("a".into())],
+        )
+        .unwrap();
         assert_eq!(new_root, root);
         assert!(new_index_roots.is_empty());
 
         let mut bt = BTree::new(&mut pager, new_root);
-        let payload = bt.search(&crate::types::value::encode_key(&Value::Integer(1))).unwrap().unwrap();
-        assert_eq!(crate::types::row::decode_row(&s, &payload), vec![Value::Integer(1), Value::Text("a".into())]);
+        let payload = bt
+            .search(&crate::types::value::encode_key(&Value::Integer(1)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::types::row::decode_row(&s, &payload),
+            vec![Value::Integer(1), Value::Text("a".into())]
+        );
     }
 
     #[test]
@@ -135,7 +169,11 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(root).unwrap());
         let s = schema(root);
         let err = insert_row(&mut pager, &s, &[], &[Value::Integer(1), Value::Null]).unwrap_err();
         assert!(matches!(err, ExecError::NotNullViolation(_)));
@@ -146,10 +184,26 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(root).unwrap());
         let s = schema(root);
-        insert_row(&mut pager, &s, &[], &[Value::Integer(1), Value::Text("a".into())]).unwrap();
-        let err = insert_row(&mut pager, &s, &[], &[Value::Integer(1), Value::Text("b".into())]).unwrap_err();
+        insert_row(
+            &mut pager,
+            &s,
+            &[],
+            &[Value::Integer(1), Value::Text("a".into())],
+        )
+        .unwrap();
+        let err = insert_row(
+            &mut pager,
+            &s,
+            &[],
+            &[Value::Integer(1), Value::Text("b".into())],
+        )
+        .unwrap_err();
         assert!(matches!(err, ExecError::DuplicatePrimaryKey));
     }
 
@@ -164,9 +218,19 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(root).unwrap());
         let s = schema(root);
-        let err = insert_row(&mut pager, &s, &[], &[Value::Integer(1), Value::Text("a\0b".into())]).unwrap_err();
+        let err = insert_row(
+            &mut pager,
+            &s,
+            &[],
+            &[Value::Integer(1), Value::Text("a\0b".into())],
+        )
+        .unwrap_err();
         assert!(matches!(err, ExecError::InvalidValue(_)));
     }
 
@@ -175,17 +239,39 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let table_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(table_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(table_root).unwrap());
         let index_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(index_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(index_root).unwrap());
         let s = schema(table_root);
-        let idx = IndexSchema { name: "idx_name".into(), table: "t".into(), column: "name".into(), root_page: index_root };
+        let idx = IndexSchema {
+            name: "idx_name".into(),
+            table: "t".into(),
+            column: "name".into(),
+            root_page: index_root,
+        };
 
-        let (_, new_index_roots) = insert_row(&mut pager, &s, &[idx.clone()], &[Value::Integer(1), Value::Text("a".into())]).unwrap();
+        let (_, new_index_roots) = insert_row(
+            &mut pager,
+            &s,
+            &[idx.clone()],
+            &[Value::Integer(1), Value::Text("a".into())],
+        )
+        .unwrap();
         let final_index_root = new_index_roots[0].1;
 
         let mut ibt = BTree::new(&mut pager, final_index_root);
-        let idx_key = crate::types::value::encode_composite_key(&[Value::Text("a".into()), Value::Integer(1)]);
+        let idx_key = crate::types::value::encode_composite_key(&[
+            Value::Text("a".into()),
+            Value::Integer(1),
+        ]);
         assert_eq!(ibt.search(&idx_key).unwrap(), Some(vec![]));
     }
 
@@ -194,26 +280,57 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let table_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(table_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(table_root).unwrap());
         let index_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(index_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(index_root).unwrap());
         let s = schema(table_root);
-        let idx = IndexSchema { name: "idx_name".into(), table: "t".into(), column: "name".into(), root_page: index_root };
+        let idx = IndexSchema {
+            name: "idx_name".into(),
+            table: "t".into(),
+            column: "name".into(),
+            root_page: index_root,
+        };
 
-        let (table_root, roots) = insert_row(&mut pager, &s, &[idx.clone()], &[Value::Integer(1), Value::Text("a".into())]).unwrap();
+        let (table_root, roots) = insert_row(
+            &mut pager,
+            &s,
+            &[idx.clone()],
+            &[Value::Integer(1), Value::Text("a".into())],
+        )
+        .unwrap();
         let mut s2 = s.clone();
         s2.root_page = table_root;
         let mut idx2 = idx.clone();
         idx2.root_page = roots[0].1;
 
-        let (new_table_root, new_index_roots) =
-            delete_row(&mut pager, &s2, &[idx2.clone()], &[Value::Integer(1), Value::Text("a".into())]).unwrap();
+        let (new_table_root, new_index_roots) = delete_row(
+            &mut pager,
+            &s2,
+            &[idx2.clone()],
+            &[Value::Integer(1), Value::Text("a".into())],
+        )
+        .unwrap();
 
         let mut bt = BTree::new(&mut pager, new_table_root);
-        assert_eq!(bt.search(&crate::types::value::encode_key(&Value::Integer(1))).unwrap(), None);
+        assert_eq!(
+            bt.search(&crate::types::value::encode_key(&Value::Integer(1)))
+                .unwrap(),
+            None
+        );
 
         let mut ibt = BTree::new(&mut pager, new_index_roots[0].1);
-        let idx_key = crate::types::value::encode_composite_key(&[Value::Text("a".into()), Value::Integer(1)]);
+        let idx_key = crate::types::value::encode_composite_key(&[
+            Value::Text("a".into()),
+            Value::Integer(1),
+        ]);
         assert_eq!(ibt.search(&idx_key).unwrap(), None);
     }
 
@@ -222,13 +339,32 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = Pager::create(file.path()).unwrap();
         let table_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(table_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(table_root).unwrap());
         let index_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(index_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(index_root).unwrap());
         let s = schema(table_root);
-        let idx = IndexSchema { name: "idx_name".into(), table: "t".into(), column: "name".into(), root_page: index_root };
+        let idx = IndexSchema {
+            name: "idx_name".into(),
+            table: "t".into(),
+            column: "name".into(),
+            root_page: index_root,
+        };
 
-        let (table_root, roots) = insert_row(&mut pager, &s, &[idx.clone()], &[Value::Integer(1), Value::Text("a".into())]).unwrap();
+        let (table_root, roots) = insert_row(
+            &mut pager,
+            &s,
+            &[idx.clone()],
+            &[Value::Integer(1), Value::Text("a".into())],
+        )
+        .unwrap();
         let mut s2 = s.clone();
         s2.root_page = table_root;
         let mut idx2 = idx.clone();
@@ -240,12 +376,21 @@ mod tests {
             update_row(&mut pager, &s2, &[idx2.clone()], &old_row, &new_row).unwrap();
 
         let mut bt = BTree::new(&mut pager, new_table_root);
-        let payload = bt.search(&crate::types::value::encode_key(&Value::Integer(1))).unwrap().unwrap();
+        let payload = bt
+            .search(&crate::types::value::encode_key(&Value::Integer(1)))
+            .unwrap()
+            .unwrap();
         assert_eq!(crate::types::row::decode_row(&s2, &payload), new_row);
 
         let mut ibt = BTree::new(&mut pager, new_index_roots[0].1);
-        let old_key = crate::types::value::encode_composite_key(&[Value::Text("a".into()), Value::Integer(1)]);
-        let new_key = crate::types::value::encode_composite_key(&[Value::Text("z".into()), Value::Integer(1)]);
+        let old_key = crate::types::value::encode_composite_key(&[
+            Value::Text("a".into()),
+            Value::Integer(1),
+        ]);
+        let new_key = crate::types::value::encode_composite_key(&[
+            Value::Text("z".into()),
+            Value::Integer(1),
+        ]);
         assert_eq!(ibt.search(&old_key).unwrap(), None);
         assert_eq!(ibt.search(&new_key).unwrap(), Some(vec![]));
     }

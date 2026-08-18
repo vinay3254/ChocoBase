@@ -18,25 +18,76 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
             continue;
         }
         match c {
-            '(' => { chars.next(); tokens.push(SpannedToken { token: Token::LParen, offset: start }); }
-            ')' => { chars.next(); tokens.push(SpannedToken { token: Token::RParen, offset: start }); }
-            ',' => { chars.next(); tokens.push(SpannedToken { token: Token::Comma, offset: start }); }
-            '*' => { chars.next(); tokens.push(SpannedToken { token: Token::Star, offset: start }); }
-            '.' => { chars.next(); tokens.push(SpannedToken { token: Token::Dot, offset: start }); }
-            ';' => { chars.next(); tokens.push(SpannedToken { token: Token::Semicolon, offset: start }); }
-            '=' => { chars.next(); tokens.push(SpannedToken { token: Token::Eq, offset: start }); }
+            '(' => {
+                chars.next();
+                tokens.push(SpannedToken {
+                    token: Token::LParen,
+                    offset: start,
+                });
+            }
+            ')' => {
+                chars.next();
+                tokens.push(SpannedToken {
+                    token: Token::RParen,
+                    offset: start,
+                });
+            }
+            ',' => {
+                chars.next();
+                tokens.push(SpannedToken {
+                    token: Token::Comma,
+                    offset: start,
+                });
+            }
+            '*' => {
+                chars.next();
+                tokens.push(SpannedToken {
+                    token: Token::Star,
+                    offset: start,
+                });
+            }
+            '.' => {
+                chars.next();
+                tokens.push(SpannedToken {
+                    token: Token::Dot,
+                    offset: start,
+                });
+            }
+            ';' => {
+                chars.next();
+                tokens.push(SpannedToken {
+                    token: Token::Semicolon,
+                    offset: start,
+                });
+            }
+            '=' => {
+                chars.next();
+                tokens.push(SpannedToken {
+                    token: Token::Eq,
+                    offset: start,
+                });
+            }
             '<' => {
                 chars.next();
                 match chars.peek() {
                     Some(&(_, '=')) => {
                         chars.next();
-                        tokens.push(SpannedToken { token: Token::LtEq, offset: start });
+                        tokens.push(SpannedToken {
+                            token: Token::LtEq,
+                            offset: start,
+                        });
                     }
                     Some(&(_, '>')) => {
                         chars.next();
-                        tokens.push(SpannedToken { token: Token::NotEq, offset: start });
+                        tokens.push(SpannedToken {
+                            token: Token::NotEq,
+                            offset: start,
+                        });
                     }
-                    _ => tokens.push(SpannedToken { token: Token::Lt, offset: start }),
+                    _ => tokens.push(SpannedToken {
+                        token: Token::Lt,
+                        offset: start,
+                    }),
                 }
             }
             '>' => {
@@ -44,9 +95,15 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                 match chars.peek() {
                     Some(&(_, '=')) => {
                         chars.next();
-                        tokens.push(SpannedToken { token: Token::GtEq, offset: start });
+                        tokens.push(SpannedToken {
+                            token: Token::GtEq,
+                            offset: start,
+                        });
                     }
-                    _ => tokens.push(SpannedToken { token: Token::Gt, offset: start }),
+                    _ => tokens.push(SpannedToken {
+                        token: Token::Gt,
+                        offset: start,
+                    }),
                 }
             }
             '-' => {
@@ -65,9 +122,15 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                         chars.next();
                         if let Some(&(_, '>')) = chars.peek() {
                             chars.next();
-                            tokens.push(SpannedToken { token: Token::ArrowText, offset: start });
+                            tokens.push(SpannedToken {
+                                token: Token::ArrowText,
+                                offset: start,
+                            });
                         } else {
-                            tokens.push(SpannedToken { token: Token::Arrow, offset: start });
+                            tokens.push(SpannedToken {
+                                token: Token::Arrow,
+                                offset: start,
+                            });
                         }
                     }
                     Some(&(_, c2)) if c2.is_ascii_digit() => {
@@ -84,9 +147,17 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                             offset: start,
                             message: "integer literal overflow".into(),
                         })?;
-                        tokens.push(SpannedToken { token: Token::IntLiteral(n), offset: start });
+                        tokens.push(SpannedToken {
+                            token: Token::IntLiteral(n),
+                            offset: start,
+                        });
                     }
-                    _ => return Err(ParseError::Syntax { offset: start, message: "unexpected '-'".into() }),
+                    _ => {
+                        return Err(ParseError::Syntax {
+                            offset: start,
+                            message: "unexpected '-'".into(),
+                        })
+                    }
                 }
             }
             '/' => {
@@ -110,7 +181,10 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                         });
                     }
                 } else {
-                    return Err(ParseError::Syntax { offset: start, message: "unexpected '/'".into() });
+                    return Err(ParseError::Syntax {
+                        offset: start,
+                        message: "unexpected '/'".into(),
+                    });
                 }
             }
             '!' => {
@@ -118,9 +192,17 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                 match chars.peek() {
                     Some(&(_, '=')) => {
                         chars.next();
-                        tokens.push(SpannedToken { token: Token::NotEq, offset: start });
+                        tokens.push(SpannedToken {
+                            token: Token::NotEq,
+                            offset: start,
+                        });
                     }
-                    _ => return Err(ParseError::Syntax { offset: start, message: "unexpected '!'".into() }),
+                    _ => {
+                        return Err(ParseError::Syntax {
+                            offset: start,
+                            message: "unexpected '!'".into(),
+                        })
+                    }
                 }
             }
             '\'' => {
@@ -145,7 +227,10 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                         Some((_, ch)) => s.push(ch),
                     }
                 }
-                tokens.push(SpannedToken { token: Token::StringLiteral(s), offset: start });
+                tokens.push(SpannedToken {
+                    token: Token::StringLiteral(s),
+                    offset: start,
+                });
             }
             c if c.is_ascii_digit() => {
                 let mut end = start + c.len_utf8();
@@ -159,10 +244,14 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                     }
                 }
                 let text = &src[start..end];
-                let n: i64 = text
-                    .parse()
-                    .map_err(|_| ParseError::Syntax { offset: start, message: "invalid integer literal".into() })?;
-                tokens.push(SpannedToken { token: Token::IntLiteral(n), offset: start });
+                let n: i64 = text.parse().map_err(|_| ParseError::Syntax {
+                    offset: start,
+                    message: "invalid integer literal".into(),
+                })?;
+                tokens.push(SpannedToken {
+                    token: Token::IntLiteral(n),
+                    offset: start,
+                });
             }
             c if c.is_alphabetic() || c == '_' => {
                 let mut end = start + c.len_utf8();
@@ -176,12 +265,23 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                     }
                 }
                 let text = &src[start..end];
-                tokens.push(SpannedToken { token: keyword_or_identifier(text), offset: start });
+                tokens.push(SpannedToken {
+                    token: keyword_or_identifier(text),
+                    offset: start,
+                });
             }
-            _ => return Err(ParseError::Syntax { offset: start, message: format!("unexpected character '{c}'") }),
+            _ => {
+                return Err(ParseError::Syntax {
+                    offset: start,
+                    message: format!("unexpected character '{c}'"),
+                })
+            }
         }
     }
-    tokens.push(SpannedToken { token: Token::Eof, offset: src.len() });
+    tokens.push(SpannedToken {
+        token: Token::Eof,
+        offset: src.len(),
+    });
     Ok(tokens)
 }
 
@@ -265,7 +365,11 @@ mod tests {
     use super::*;
 
     fn kinds(src: &str) -> Vec<Token> {
-        tokenize(src).unwrap().into_iter().map(|t| t.token).collect()
+        tokenize(src)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect()
     }
 
     #[test]
@@ -274,29 +378,56 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::Create, Token::Table, Token::Identifier("users".into()), Token::LParen,
-                Token::Identifier("id".into()), Token::KwInteger, Token::Primary, Token::Key, Token::Comma,
-                Token::Identifier("name".into()), Token::KwText, Token::Not, Token::Null,
-                Token::RParen, Token::Eof,
+                Token::Create,
+                Token::Table,
+                Token::Identifier("users".into()),
+                Token::LParen,
+                Token::Identifier("id".into()),
+                Token::KwInteger,
+                Token::Primary,
+                Token::Key,
+                Token::Comma,
+                Token::Identifier("name".into()),
+                Token::KwText,
+                Token::Not,
+                Token::Null,
+                Token::RParen,
+                Token::Eof,
             ]
         );
     }
 
     #[test]
     fn tokenizes_operators() {
-        assert_eq!(kinds("<= >= <> != < > ="), vec![
-            Token::LtEq, Token::GtEq, Token::NotEq, Token::NotEq, Token::Lt, Token::Gt, Token::Eq, Token::Eof
-        ]);
+        assert_eq!(
+            kinds("<= >= <> != < > ="),
+            vec![
+                Token::LtEq,
+                Token::GtEq,
+                Token::NotEq,
+                Token::NotEq,
+                Token::Lt,
+                Token::Gt,
+                Token::Eq,
+                Token::Eof
+            ]
+        );
     }
 
     #[test]
     fn tokenizes_string_literal_with_escaped_quote() {
-        assert_eq!(kinds("'it''s'"), vec![Token::StringLiteral("it's".into()), Token::Eof]);
+        assert_eq!(
+            kinds("'it''s'"),
+            vec![Token::StringLiteral("it's".into()), Token::Eof]
+        );
     }
 
     #[test]
     fn tokenizes_keywords_case_insensitively() {
-        assert_eq!(kinds("select FROM Where"), vec![Token::Select, Token::From, Token::Where, Token::Eof]);
+        assert_eq!(
+            kinds("select FROM Where"),
+            vec![Token::Select, Token::From, Token::Where, Token::Eof]
+        );
     }
 
     #[test]
@@ -313,7 +444,10 @@ mod tests {
         // literal containing multi-byte characters must round-trip exactly rather
         // than being corrupted or causing a byte-index panic. `é` and `€` are 2-
         // and 3-byte UTF-8 sequences respectively.
-        assert_eq!(kinds("'café €5'"), vec![Token::StringLiteral("café €5".into()), Token::Eof]);
+        assert_eq!(
+            kinds("'café €5'"),
+            vec![Token::StringLiteral("café €5".into()), Token::Eof]
+        );
     }
 
     #[test]
@@ -325,7 +459,12 @@ mod tests {
         let offsets: Vec<usize> = tokens.iter().map(|t| t.offset).collect();
         assert_eq!(
             tokens.iter().map(|t| t.token.clone()).collect::<Vec<_>>(),
-            vec![Token::Identifier("café".into()), Token::Eq, Token::IntLiteral(1), Token::Eof]
+            vec![
+                Token::Identifier("café".into()),
+                Token::Eq,
+                Token::IntLiteral(1),
+                Token::Eof
+            ]
         );
         // "café" is 5 bytes (c=1,a=1,f=1,é=2), so '=' starts at byte offset 6 (after
         // the trailing space), not char-index 5.

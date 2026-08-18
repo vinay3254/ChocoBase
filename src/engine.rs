@@ -1,13 +1,13 @@
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::btree::node::LeafNode;
 use crate::catalog::Catalog;
 use crate::error::{DbError, ExecError, PlanError, Result};
 use crate::exec::Operator;
-use crate::sql::ast::{BinOp, ColumnDef, Statement, Expr, SelectColumns, SelectItem};
+use crate::sql::ast::{BinOp, ColumnDef, Expr, SelectColumns, SelectItem, Statement};
 use crate::storage::pager::Pager;
-use crate::types::schema::{Column, TableSchema, IndexSchema};
+use crate::types::schema::{Column, IndexSchema, TableSchema};
 use crate::types::value::{ColumnType, Value};
 
 use crate::auth::ExecutionContext;
@@ -69,7 +69,9 @@ impl SharedDatabase {
         })
     }
 
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::server::protocol::ChangeEvent> {
+    pub fn subscribe(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::server::protocol::ChangeEvent> {
         self.change_tx.subscribe()
     }
 
@@ -87,7 +89,11 @@ impl SharedDatabase {
         self.execute_with_context(sql, &crate::auth::ExecutionContext::admin())
     }
 
-    pub fn execute_with_context(&self, sql: &str, ctx: &crate::auth::ExecutionContext) -> Result<ExecResult> {
+    pub fn execute_with_context(
+        &self,
+        sql: &str,
+        ctx: &crate::auth::ExecutionContext,
+    ) -> Result<ExecResult> {
         let stmt = crate::sql::parser::parse(sql)?;
         match stmt {
             Statement::Begin => {
@@ -147,7 +153,10 @@ impl SharedDatabase {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ExecResult {
-    Rows { columns: Vec<String>, rows: Vec<Vec<Value>> },
+    Rows {
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+    },
     Modified(usize),
     Ok,
 }
@@ -158,7 +167,13 @@ impl Database {
         let mut pager = Pager::create(path)?;
         let catalog = Catalog::bootstrap(&mut pager)?;
         pager.flush()?;
-        let mut db = Database { pager, catalog, _lock: lock, change_tx: None, transaction_events: Vec::new() };
+        let mut db = Database {
+            pager,
+            catalog,
+            _lock: lock,
+            change_tx: None,
+            transaction_events: Vec::new(),
+        };
         db.ensure_auth_table()?;
         Ok(db)
     }
@@ -168,7 +183,13 @@ impl Database {
         let mut pager = Pager::open(path)?;
         let catalog = Catalog::bootstrap(&mut pager)?;
         pager.flush()?;
-        let mut db = Database { pager, catalog, _lock: lock, change_tx: None, transaction_events: Vec::new() };
+        let mut db = Database {
+            pager,
+            catalog,
+            _lock: lock,
+            change_tx: None,
+            transaction_events: Vec::new(),
+        };
         db.ensure_auth_table()?;
         Ok(db)
     }
@@ -176,14 +197,43 @@ impl Database {
     pub fn ensure_auth_table(&mut self) -> Result<()> {
         if self.catalog.get_table(&mut self.pager, "_users")?.is_none() {
             let cols = vec![
-                crate::types::schema::Column { name: "id".into(), ty: crate::types::value::ColumnType::Integer, not_null: true, is_primary_key: true },
-                crate::types::schema::Column { name: "username".into(), ty: crate::types::value::ColumnType::Text, not_null: true, is_primary_key: false },
-                crate::types::schema::Column { name: "password_hash".into(), ty: crate::types::value::ColumnType::Text, not_null: true, is_primary_key: false },
-                crate::types::schema::Column { name: "role".into(), ty: crate::types::value::ColumnType::Text, not_null: true, is_primary_key: false },
+                crate::types::schema::Column {
+                    name: "id".into(),
+                    ty: crate::types::value::ColumnType::Integer,
+                    not_null: true,
+                    is_primary_key: true,
+                },
+                crate::types::schema::Column {
+                    name: "username".into(),
+                    ty: crate::types::value::ColumnType::Text,
+                    not_null: true,
+                    is_primary_key: false,
+                },
+                crate::types::schema::Column {
+                    name: "password_hash".into(),
+                    ty: crate::types::value::ColumnType::Text,
+                    not_null: true,
+                    is_primary_key: false,
+                },
+                crate::types::schema::Column {
+                    name: "role".into(),
+                    ty: crate::types::value::ColumnType::Text,
+                    not_null: true,
+                    is_primary_key: false,
+                },
             ];
             let root = self.pager.allocate_page()?;
-            LeafNode { entries: vec![], next_leaf: 0 }.encode(self.pager.get_page_mut(root)?);
-            let schema = TableSchema { name: "_users".into(), columns: cols, root_page: root, rls_enabled: false };
+            LeafNode {
+                entries: vec![],
+                next_leaf: 0,
+            }
+            .encode(self.pager.get_page_mut(root)?);
+            let schema = TableSchema {
+                name: "_users".into(),
+                columns: cols,
+                root_page: root,
+                rls_enabled: false,
+            };
             self.catalog.create_table(&mut self.pager, &schema)?;
         }
         Ok(())
@@ -193,7 +243,11 @@ impl Database {
         self.execute_with_context(sql, &crate::auth::ExecutionContext::admin())
     }
 
-    pub fn execute_with_context(&mut self, sql: &str, ctx: &crate::auth::ExecutionContext) -> Result<ExecResult> {
+    pub fn execute_with_context(
+        &mut self,
+        sql: &str,
+        ctx: &crate::auth::ExecutionContext,
+    ) -> Result<ExecResult> {
         let stmt = crate::sql::parser::parse(sql)?;
         match stmt {
             Statement::Begin => {
@@ -234,12 +288,23 @@ impl Database {
                 having,
                 order_by,
                 limit,
-            } => {
-                self.execute_select(columns, &table, table_ref, where_clause, group_by, having, order_by, limit, ctx)
-            }
+            } => self.execute_select(
+                columns,
+                &table,
+                table_ref,
+                where_clause,
+                group_by,
+                having,
+                order_by,
+                limit,
+                ctx,
+            ),
             Statement::Explain(inner_stmt) => {
                 let plan_lines = self.explain_statement(&inner_stmt, ctx)?;
-                let rows = plan_lines.into_iter().map(|line| vec![Value::Text(line)]).collect();
+                let rows = plan_lines
+                    .into_iter()
+                    .map(|line| vec![Value::Text(line)])
+                    .collect();
                 Ok(ExecResult::Rows {
                     columns: vec!["QUERY PLAN".to_string()],
                     rows,
@@ -263,7 +328,8 @@ impl Database {
                         Err(e) => {
                             self.transaction_events.clear();
                             let _ = self.pager.rollback_transaction();
-                            let _ = Catalog::bootstrap(&mut self.pager).map(|cat| self.catalog = cat);
+                            let _ =
+                                Catalog::bootstrap(&mut self.pager).map(|cat| self.catalog = cat);
                             Err(e)
                         }
                     }
@@ -287,7 +353,9 @@ impl Database {
             return Ok(user_where);
         }
 
-        let policies = self.catalog.list_policies_for_table(&mut self.pager, table)?;
+        let policies = self
+            .catalog
+            .list_policies_for_table(&mut self.pager, table)?;
         let matching: Vec<&crate::types::schema::PolicySchema> = policies
             .iter()
             .filter(|p| p.cmd == cmd || p.cmd == crate::types::schema::PolicyCmd::All)
@@ -328,21 +396,59 @@ impl Database {
         }
     }
 
-    fn execute_mutating(&mut self, stmt: Statement, ctx: &crate::auth::ExecutionContext) -> Result<ExecResult> {
+    fn execute_mutating(
+        &mut self,
+        stmt: Statement,
+        ctx: &crate::auth::ExecutionContext,
+    ) -> Result<ExecResult> {
         match stmt {
             Statement::CreateTable { name, columns } => self.execute_create_table(name, columns),
             Statement::DropTable { name } => self.execute_drop_table(&name),
-            Statement::CreateIndex { name, table, column } => self.execute_create_index(&name, &table, &column),
+            Statement::CreateIndex {
+                name,
+                table,
+                column,
+            } => self.execute_create_index(&name, &table, &column),
             Statement::DropIndex { name } => self.execute_drop_index(&name),
-            Statement::Insert { table, columns, rows } => self.execute_insert(&table, columns, rows, ctx),
-            Statement::Delete { table, where_clause } => self.execute_delete(&table, where_clause, ctx),
-            Statement::Update { table, assignments, where_clause } => self.execute_update(&table, assignments, where_clause, ctx),
-            Statement::CreateUser { username, password, role } => self.execute_create_user(username, password, role),
-            Statement::AlterTableRls { table, enabled } => self.execute_alter_table_rls(&table, enabled),
-            Statement::CreatePolicy { name, table, cmd, using_expr, with_check } => {
-                self.catalog.create_policy(&mut self.pager, &crate::types::schema::PolicySchema {
-                    name, table, cmd, using_expr, with_check
-                })?;
+            Statement::Insert {
+                table,
+                columns,
+                rows,
+            } => self.execute_insert(&table, columns, rows, ctx),
+            Statement::Delete {
+                table,
+                where_clause,
+            } => self.execute_delete(&table, where_clause, ctx),
+            Statement::Update {
+                table,
+                assignments,
+                where_clause,
+            } => self.execute_update(&table, assignments, where_clause, ctx),
+            Statement::CreateUser {
+                username,
+                password,
+                role,
+            } => self.execute_create_user(username, password, role),
+            Statement::AlterTableRls { table, enabled } => {
+                self.execute_alter_table_rls(&table, enabled)
+            }
+            Statement::CreatePolicy {
+                name,
+                table,
+                cmd,
+                using_expr,
+                with_check,
+            } => {
+                self.catalog.create_policy(
+                    &mut self.pager,
+                    &crate::types::schema::PolicySchema {
+                        name,
+                        table,
+                        cmd,
+                        using_expr,
+                        with_check,
+                    },
+                )?;
                 Ok(ExecResult::Ok)
             }
             Statement::DropPolicy { name, .. } => {
@@ -353,7 +459,12 @@ impl Database {
         }
     }
 
-    fn execute_create_user(&mut self, username: String, password: String, role: Option<String>) -> Result<ExecResult> {
+    fn execute_create_user(
+        &mut self,
+        username: String,
+        password: String,
+        role: Option<String>,
+    ) -> Result<ExecResult> {
         self.ensure_auth_table()?;
         let role = role.unwrap_or_else(|| "user".into());
         let hash = crate::auth::hash_password(&password);
@@ -364,7 +475,9 @@ impl Database {
         while let Some(row) = scan.next(&mut self.pager)? {
             if let Value::Text(existing) = &row[1] {
                 if existing == &username {
-                    return Err(DbError::Exec(crate::error::ExecError::InvalidValue(format!("user '{username}' already exists"))));
+                    return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+                        format!("user '{username}' already exists"),
+                    )));
                 }
             }
             if let Value::Integer(id) = row[0] {
@@ -383,17 +496,23 @@ impl Database {
         ];
         let (new_root, _) = crate::exec::mutate::insert_row(&mut self.pager, &schema, &[], &row)?;
         if new_root != schema.root_page {
-            self.catalog.update_table_root(&mut self.pager, "_users", new_root)?;
+            self.catalog
+                .update_table_root(&mut self.pager, "_users", new_root)?;
         }
         Ok(ExecResult::Modified(1))
     }
 
     fn execute_alter_table_rls(&mut self, table: &str, enabled: bool) -> Result<ExecResult> {
-        self.catalog.set_table_rls(&mut self.pager, table, enabled)?;
+        self.catalog
+            .set_table_rls(&mut self.pager, table, enabled)?;
         Ok(ExecResult::Ok)
     }
 
-    fn execute_create_table(&mut self, name: String, columns: Vec<ColumnDef>) -> Result<ExecResult> {
+    fn execute_create_table(
+        &mut self,
+        name: String,
+        columns: Vec<ColumnDef>,
+    ) -> Result<ExecResult> {
         let pk_count = columns.iter().filter(|c| c.primary_key).count();
         if pk_count != 1 {
             return Err(DbError::Plan(PlanError::InvalidSchema(format!(
@@ -401,7 +520,11 @@ impl Database {
             ))));
         }
         let root = self.pager.allocate_page()?;
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(self.pager.get_page_mut(root)?);
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(self.pager.get_page_mut(root)?);
         let cols = columns
             .into_iter()
             .map(|c| Column {
@@ -411,7 +534,12 @@ impl Database {
                 is_primary_key: c.primary_key,
             })
             .collect();
-        let schema = TableSchema { name, columns: cols, root_page: root, rls_enabled: false };
+        let schema = TableSchema {
+            name,
+            columns: cols,
+            root_page: root,
+            rls_enabled: false,
+        };
         self.catalog.create_table(&mut self.pager, &schema)?;
         Ok(ExecResult::Ok)
     }
@@ -421,7 +549,12 @@ impl Database {
         Ok(ExecResult::Ok)
     }
 
-    fn execute_create_index(&mut self, name: &str, table: &str, column: &str) -> Result<ExecResult> {
+    fn execute_create_index(
+        &mut self,
+        name: &str,
+        table: &str,
+        column: &str,
+    ) -> Result<ExecResult> {
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
@@ -436,13 +569,20 @@ impl Database {
         }
 
         let initial_index_root = self.pager.allocate_page()?;
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(self.pager.get_page_mut(initial_index_root)?);
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(self.pager.get_page_mut(initial_index_root)?);
 
         let pk_idx = schema.primary_key_index();
         let mut scan = crate::exec::scan::SeqScan::new(schema.clone());
         let mut current_root = initial_index_root;
         while let Some(row) = scan.next(&mut self.pager)? {
-            let idx_key = crate::types::value::encode_composite_key(&[row[col_idx].clone(), row[pk_idx].clone()]);
+            let idx_key = crate::types::value::encode_composite_key(&[
+                row[col_idx].clone(),
+                row[pk_idx].clone(),
+            ]);
             let mut ibt = crate::btree::tree::BTree::new(&mut self.pager, current_root);
             ibt.insert(&idx_key, &[])?;
             current_root = ibt.root();
@@ -474,16 +614,25 @@ impl Database {
             .catalog
             .get_table(&mut self.pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
-        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+        let indexes = self
+            .catalog
+            .list_indexes_for_table(&mut self.pager, table)?;
 
         let policies = if schema.rls_enabled && !ctx.is_admin {
-            let list = self.catalog.list_policies_for_table(&mut self.pager, table)?;
+            let list = self
+                .catalog
+                .list_policies_for_table(&mut self.pager, table)?;
             let matching: Vec<crate::types::schema::PolicySchema> = list
                 .into_iter()
-                .filter(|p| p.cmd == crate::types::schema::PolicyCmd::Insert || p.cmd == crate::types::schema::PolicyCmd::All)
+                .filter(|p| {
+                    p.cmd == crate::types::schema::PolicyCmd::Insert
+                        || p.cmd == crate::types::schema::PolicyCmd::All
+                })
                 .collect();
             if matching.is_empty() {
-                return Err(DbError::Exec(ExecError::InvalidValue("RLS check failed: no insert policy on table".into())));
+                return Err(DbError::Exec(ExecError::InvalidValue(
+                    "RLS check failed: no insert policy on table".into(),
+                )));
             }
             Some(matching)
         } else {
@@ -491,8 +640,10 @@ impl Database {
         };
 
         let mut table_root = schema.root_page;
-        let mut index_roots: HashMap<String, u32> =
-            indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
+        let mut index_roots: HashMap<String, u32> = indexes
+            .iter()
+            .map(|i| (i.name.clone(), i.root_page))
+            .collect();
         let mut count = 0usize;
 
         for expr_row in &rows {
@@ -509,7 +660,8 @@ impl Database {
                         let idx = schema
                             .column_index(cname)
                             .ok_or_else(|| PlanError::NoSuchColumn(cname.clone()))?;
-                        full_row[idx] = literal_to_value_typed(expr, Some(&schema.columns[idx].ty))?;
+                        full_row[idx] =
+                            literal_to_value_typed(expr, Some(&schema.columns[idx].ty))?;
                     }
                 }
                 None => {
@@ -520,7 +672,8 @@ impl Database {
                         }));
                     }
                     for (idx, expr) in expr_row.iter().enumerate() {
-                        full_row[idx] = literal_to_value_typed(expr, Some(&schema.columns[idx].ty))?;
+                        full_row[idx] =
+                            literal_to_value_typed(expr, Some(&schema.columns[idx].ty))?;
                     }
                 }
             }
@@ -536,7 +689,9 @@ impl Database {
                 for pol in pols {
                     let check = pol.with_check.as_ref().or(pol.using_expr.as_ref());
                     if let Some(expr) = check {
-                        let res = crate::plan::expr::eval_with_context(expr, &schema, &full_row, ctx).map_err(DbError::Plan)?;
+                        let res =
+                            crate::plan::expr::eval_with_context(expr, &schema, &full_row, ctx)
+                                .map_err(DbError::Plan)?;
                         if crate::plan::expr::is_truthy(&res) {
                             passed = true;
                             break;
@@ -547,7 +702,9 @@ impl Database {
                     }
                 }
                 if !passed {
-                    return Err(DbError::Exec(ExecError::InvalidValue("row violates row-level security policy".into())));
+                    return Err(DbError::Exec(ExecError::InvalidValue(
+                        "row violates row-level security policy".into(),
+                    )));
                 }
             }
 
@@ -562,8 +719,12 @@ impl Database {
                 })
                 .collect();
 
-            let (new_table_root, new_index_roots) =
-                crate::exec::mutate::insert_row(&mut self.pager, &schema_for_write, &indexes_for_write, &full_row)?;
+            let (new_table_root, new_index_roots) = crate::exec::mutate::insert_row(
+                &mut self.pager,
+                &schema_for_write,
+                &indexes_for_write,
+                &full_row,
+            )?;
             table_root = new_table_root;
             for (name, root) in new_index_roots {
                 index_roots.insert(name, root);
@@ -588,12 +749,14 @@ impl Database {
         }
 
         if table_root != schema.root_page {
-            self.catalog.update_table_root(&mut self.pager, table, table_root)?;
+            self.catalog
+                .update_table_root(&mut self.pager, table, table_root)?;
         }
         for idx in &indexes {
             let new_root = index_roots[&idx.name];
             if new_root != idx.root_page {
-                self.catalog.update_index_root(&mut self.pager, &idx.name, new_root)?;
+                self.catalog
+                    .update_index_root(&mut self.pager, &idx.name, new_root)?;
             }
         }
 
@@ -607,12 +770,19 @@ impl Database {
         where_clause: Option<Expr>,
         ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
-        let where_clause = self.apply_rls_filter(table, crate::types::schema::PolicyCmd::Update, where_clause, ctx)?;
+        let where_clause = self.apply_rls_filter(
+            table,
+            crate::types::schema::PolicyCmd::Update,
+            where_clause,
+            ctx,
+        )?;
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
-        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+        let indexes = self
+            .catalog
+            .list_indexes_for_table(&mut self.pager, table)?;
 
         let mut assignment_indices = Vec::new();
         for (col_name, expr) in &assignments {
@@ -626,22 +796,32 @@ impl Database {
         }
 
         let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-        let mut plan = crate::plan::planner::build_select_plan_with_context(&schema, &indexes, where_clause, all_columns, None, None, ctx)?;
+        let mut plan = crate::plan::planner::build_select_plan_with_context(
+            &schema,
+            &indexes,
+            where_clause,
+            all_columns,
+            None,
+            None,
+            ctx,
+        )?;
         let mut old_rows = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             old_rows.push(row);
         }
 
         let mut table_root = schema.root_page;
-        let mut index_roots: HashMap<String, u32> =
-            indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
+        let mut index_roots: HashMap<String, u32> = indexes
+            .iter()
+            .map(|i| (i.name.clone(), i.root_page))
+            .collect();
         let mut count = 0usize;
 
         for old_row in &old_rows {
             let mut new_row = old_row.clone();
             for (idx, expr) in &assignment_indices {
-                new_row[*idx] =
-                    crate::plan::expr::eval_with_context(expr, &schema, old_row, ctx).map_err(DbError::Plan)?;
+                new_row[*idx] = crate::plan::expr::eval_with_context(expr, &schema, old_row, ctx)
+                    .map_err(DbError::Plan)?;
             }
 
             let mut schema_for_write = schema.clone();
@@ -686,12 +866,14 @@ impl Database {
         }
 
         if table_root != schema.root_page {
-            self.catalog.update_table_root(&mut self.pager, table, table_root)?;
+            self.catalog
+                .update_table_root(&mut self.pager, table, table_root)?;
         }
         for idx in &indexes {
             let new_root = index_roots[&idx.name];
             if new_root != idx.root_page {
-                self.catalog.update_index_root(&mut self.pager, &idx.name, new_root)?;
+                self.catalog
+                    .update_index_root(&mut self.pager, &idx.name, new_root)?;
             }
         }
 
@@ -718,23 +900,40 @@ impl Database {
         let has_group_by = _group_by.is_some();
         let has_agg = match &columns {
             SelectColumns::Items(items) => items.iter().any(|item| match item {
-                SelectItem::Expr { expr: Expr::Aggregate(_), .. } => true,
+                SelectItem::Expr {
+                    expr: Expr::Aggregate(_),
+                    ..
+                } => true,
                 _ => false,
             }),
             _ => false,
         };
 
         let where_clause = if !is_join {
-            self.apply_rls_filter(table, crate::types::schema::PolicyCmd::Select, where_clause, ctx)?
+            self.apply_rls_filter(
+                table,
+                crate::types::schema::PolicyCmd::Select,
+                where_clause,
+                ctx,
+            )?
         } else {
             where_clause
         };
 
         if is_join {
             let tref = table_ref.unwrap();
-            let (mut plan, schema) = crate::plan::planner::build_table_ref_plan(&mut self.catalog, &mut self.pager, &tref)?;
+            let (mut plan, schema) = crate::plan::planner::build_table_ref_plan(
+                &mut self.catalog,
+                &mut self.pager,
+                &tref,
+            )?;
             if let Some(predicate) = where_clause {
-                plan = Box::new(crate::exec::filter::Filter { input: plan, schema: schema.clone(), predicate, context: ctx.clone() });
+                plan = Box::new(crate::exec::filter::Filter {
+                    input: plan,
+                    schema: schema.clone(),
+                    predicate,
+                    context: ctx.clone(),
+                });
             }
 
             if has_group_by || has_agg {
@@ -745,7 +944,10 @@ impl Database {
                 if let SelectColumns::Items(items) = &columns {
                     for item in items {
                         match item {
-                            SelectItem::Expr { expr: Expr::Aggregate(func), alias } => {
+                            SelectItem::Expr {
+                                expr: Expr::Aggregate(func),
+                                alias,
+                            } => {
                                 aggregates.push(func.clone());
                                 let name = alias.clone().unwrap_or_else(|| match func {
                                     crate::sql::ast::AggregateFunc::CountStar => "count(*)".into(),
@@ -760,7 +962,9 @@ impl Database {
                             SelectItem::Expr { expr, alias } => {
                                 let name = alias.clone().unwrap_or_else(|| match expr {
                                     Expr::Column(c) => c.clone(),
-                                    Expr::QualifiedColumn { table, column } => format!("{table}.{column}"),
+                                    Expr::QualifiedColumn { table, column } => {
+                                        format!("{table}.{column}")
+                                    }
                                     _ => "expr".into(),
                                 });
                                 out_names.push(name);
@@ -768,18 +972,27 @@ impl Database {
                                     group_exprs.push(expr.clone());
                                 }
                             }
-                            SelectItem::All => return Err(DbError::Plan(PlanError::InvalidExpression("cannot use SELECT * with aggregations".into()))),
+                            SelectItem::All => {
+                                return Err(DbError::Plan(PlanError::InvalidExpression(
+                                    "cannot use SELECT * with aggregations".into(),
+                                )))
+                            }
                         }
                     }
                 }
 
-                let mut agg_plan: Box<dyn Operator> = Box::new(crate::exec::aggregate::AggregateOperator::new(
-                    plan,
-                    schema.clone(),
-                    if group_exprs.is_empty() { None } else { Some(group_exprs) },
-                    aggregates,
-                    _having,
-                ));
+                let mut agg_plan: Box<dyn Operator> =
+                    Box::new(crate::exec::aggregate::AggregateOperator::new(
+                        plan,
+                        schema.clone(),
+                        if group_exprs.is_empty() {
+                            None
+                        } else {
+                            Some(group_exprs)
+                        },
+                        aggregates,
+                        _having,
+                    ));
 
                 if let Some(n) = limit {
                     agg_plan = Box::new(crate::exec::limit::Limit::new(agg_plan, n));
@@ -789,7 +1002,10 @@ impl Database {
                 while let Some(row) = agg_plan.next(&mut self.pager)? {
                     rows.push(row);
                 }
-                return Ok(ExecResult::Rows { columns: out_names, rows });
+                return Ok(ExecResult::Rows {
+                    columns: out_names,
+                    rows,
+                });
             }
 
             let (out_names, indices) = match &columns {
@@ -800,7 +1016,9 @@ impl Database {
                 SelectColumns::List(names) => {
                     let mut idxs = Vec::new();
                     for n in names {
-                        let idx = schema.column_index(n).ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?;
+                        let idx = schema
+                            .column_index(n)
+                            .ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?;
                         idxs.push(idx);
                     }
                     (names.clone(), idxs)
@@ -819,7 +1037,9 @@ impl Database {
                             SelectItem::Expr { expr, alias } => {
                                 let name = alias.clone().unwrap_or_else(|| match expr {
                                     Expr::Column(c) => c.clone(),
-                                    Expr::QualifiedColumn { table, column } => format!("{table}.{column}"),
+                                    Expr::QualifiedColumn { table, column } => {
+                                        format!("{table}.{column}")
+                                    }
                                     Expr::JsonExtract { path, .. } => path.clone(),
                                     _ => "expr".into(),
                                 });
@@ -830,10 +1050,17 @@ impl Database {
                     }
 
                     if let Some((col, desc)) = order_by {
-                        let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
+                        let idx = schema
+                            .column_index(&col)
+                            .ok_or_else(|| PlanError::NoSuchColumn(col))?;
                         plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
                     }
-                    plan = Box::new(crate::exec::project::ProjectExpr { input: plan, schema: schema.clone(), exprs, context: ctx.clone() });
+                    plan = Box::new(crate::exec::project::ProjectExpr {
+                        input: plan,
+                        schema: schema.clone(),
+                        exprs,
+                        context: ctx.clone(),
+                    });
                     if let Some(n) = limit {
                         plan = Box::new(crate::exec::limit::Limit::new(plan, n));
                     }
@@ -842,15 +1069,23 @@ impl Database {
                     while let Some(row) = plan.next(&mut self.pager)? {
                         rows.push(row);
                     }
-                    return Ok(ExecResult::Rows { columns: names, rows });
+                    return Ok(ExecResult::Rows {
+                        columns: names,
+                        rows,
+                    });
                 }
             };
 
             if let Some((col, desc)) = order_by {
-                let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
+                let idx = schema
+                    .column_index(&col)
+                    .ok_or_else(|| PlanError::NoSuchColumn(col))?;
                 plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
             }
-            plan = Box::new(crate::exec::project::Project { input: plan, indices });
+            plan = Box::new(crate::exec::project::Project {
+                input: plan,
+                indices,
+            });
             if let Some(n) = limit {
                 plan = Box::new(crate::exec::limit::Limit::new(plan, n));
             }
@@ -859,14 +1094,19 @@ impl Database {
             while let Some(row) = plan.next(&mut self.pager)? {
                 rows.push(row);
             }
-            return Ok(ExecResult::Rows { columns: out_names, rows });
+            return Ok(ExecResult::Rows {
+                columns: out_names,
+                rows,
+            });
         }
 
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
-        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+        let indexes = self
+            .catalog
+            .list_indexes_for_table(&mut self.pager, table)?;
 
         if has_group_by || has_agg {
             let mut aggregates = Vec::new();
@@ -876,7 +1116,10 @@ impl Database {
             if let SelectColumns::Items(items) = &columns {
                 for item in items {
                     match item {
-                        SelectItem::Expr { expr: Expr::Aggregate(func), alias } => {
+                        SelectItem::Expr {
+                            expr: Expr::Aggregate(func),
+                            alias,
+                        } => {
                             aggregates.push(func.clone());
                             let name = alias.clone().unwrap_or_else(|| match func {
                                 crate::sql::ast::AggregateFunc::CountStar => "count(*)".into(),
@@ -899,25 +1142,40 @@ impl Database {
                                 group_exprs.push(expr.clone());
                             }
                         }
-                        SelectItem::All => return Err(DbError::Plan(PlanError::InvalidExpression("cannot use SELECT * with aggregations".into()))),
+                        SelectItem::All => {
+                            return Err(DbError::Plan(PlanError::InvalidExpression(
+                                "cannot use SELECT * with aggregations".into(),
+                            )))
+                        }
                     }
                 }
             }
 
-            let seq_scan: Box<dyn Operator> = Box::new(crate::exec::scan::SeqScan::new(schema.clone()));
+            let seq_scan: Box<dyn Operator> =
+                Box::new(crate::exec::scan::SeqScan::new(schema.clone()));
             let scan_plan = if let Some(predicate) = where_clause {
-                Box::new(crate::exec::filter::Filter { input: seq_scan, schema: schema.clone(), predicate, context: ctx.clone() })
+                Box::new(crate::exec::filter::Filter {
+                    input: seq_scan,
+                    schema: schema.clone(),
+                    predicate,
+                    context: ctx.clone(),
+                })
             } else {
                 seq_scan
             };
 
-            let mut plan: Box<dyn Operator> = Box::new(crate::exec::aggregate::AggregateOperator::new(
-                scan_plan,
-                schema.clone(),
-                if group_exprs.is_empty() { None } else { Some(group_exprs) },
-                aggregates,
-                _having,
-            ));
+            let mut plan: Box<dyn Operator> =
+                Box::new(crate::exec::aggregate::AggregateOperator::new(
+                    scan_plan,
+                    schema.clone(),
+                    if group_exprs.is_empty() {
+                        None
+                    } else {
+                        Some(group_exprs)
+                    },
+                    aggregates,
+                    _having,
+                ));
 
             if let Some(n) = limit {
                 plan = Box::new(crate::exec::limit::Limit::new(plan, n));
@@ -927,7 +1185,10 @@ impl Database {
             while let Some(row) = plan.next(&mut self.pager)? {
                 rows.push(row);
             }
-            return Ok(ExecResult::Rows { columns: out_names, rows });
+            return Ok(ExecResult::Rows {
+                columns: out_names,
+                rows,
+            });
         }
 
         let (out_names, indices): (Vec<String>, Vec<usize>) = match &columns {
@@ -938,7 +1199,11 @@ impl Database {
             SelectColumns::List(names) => {
                 let mut idxs = Vec::new();
                 for n in names {
-                    idxs.push(schema.column_index(n).ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?);
+                    idxs.push(
+                        schema
+                            .column_index(n)
+                            .ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?,
+                    );
                 }
                 (names.clone(), idxs)
             }
@@ -967,8 +1232,21 @@ impl Database {
                 }
 
                 let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-                let mut plan = crate::plan::planner::build_select_plan_with_context(&schema, &indexes, where_clause, all_columns, order_by, None, ctx)?;
-                plan = Box::new(crate::exec::project::ProjectExpr { input: plan, schema: schema.clone(), exprs, context: ctx.clone() });
+                let mut plan = crate::plan::planner::build_select_plan_with_context(
+                    &schema,
+                    &indexes,
+                    where_clause,
+                    all_columns,
+                    order_by,
+                    None,
+                    ctx,
+                )?;
+                plan = Box::new(crate::exec::project::ProjectExpr {
+                    input: plan,
+                    schema: schema.clone(),
+                    exprs,
+                    context: ctx.clone(),
+                });
                 if let Some(n) = limit {
                     plan = Box::new(crate::exec::limit::Limit::new(plan, n));
                 }
@@ -976,36 +1254,72 @@ impl Database {
                 while let Some(row) = plan.next(&mut self.pager)? {
                     rows.push(row);
                 }
-                return Ok(ExecResult::Rows { columns: names, rows });
+                return Ok(ExecResult::Rows {
+                    columns: names,
+                    rows,
+                });
             }
         };
 
-        let mut plan = crate::plan::planner::build_select_plan_with_context(&schema, &indexes, where_clause, indices, order_by, limit, ctx)?;
+        let mut plan = crate::plan::planner::build_select_plan_with_context(
+            &schema,
+            &indexes,
+            where_clause,
+            indices,
+            order_by,
+            limit,
+            ctx,
+        )?;
         let mut rows = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             rows.push(row);
         }
-        Ok(ExecResult::Rows { columns: out_names, rows })
+        Ok(ExecResult::Rows {
+            columns: out_names,
+            rows,
+        })
     }
 
-    fn execute_delete(&mut self, table: &str, where_clause: Option<Expr>, ctx: &crate::auth::ExecutionContext) -> Result<ExecResult> {
-        let where_clause = self.apply_rls_filter(table, crate::types::schema::PolicyCmd::Delete, where_clause, ctx)?;
+    fn execute_delete(
+        &mut self,
+        table: &str,
+        where_clause: Option<Expr>,
+        ctx: &crate::auth::ExecutionContext,
+    ) -> Result<ExecResult> {
+        let where_clause = self.apply_rls_filter(
+            table,
+            crate::types::schema::PolicyCmd::Delete,
+            where_clause,
+            ctx,
+        )?;
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
-        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+        let indexes = self
+            .catalog
+            .list_indexes_for_table(&mut self.pager, table)?;
 
         let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-        let mut plan = crate::plan::planner::build_select_plan_with_context(&schema, &indexes, where_clause, all_columns, None, None, ctx)?;
+        let mut plan = crate::plan::planner::build_select_plan_with_context(
+            &schema,
+            &indexes,
+            where_clause,
+            all_columns,
+            None,
+            None,
+            ctx,
+        )?;
         let mut rows_to_delete = Vec::new();
         while let Some(row) = plan.next(&mut self.pager)? {
             rows_to_delete.push(row);
         }
 
         let mut table_root = schema.root_page;
-        let mut index_roots: HashMap<String, u32> =
-            indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
+        let mut index_roots: HashMap<String, u32> = indexes
+            .iter()
+            .map(|i| (i.name.clone(), i.root_page))
+            .collect();
         let mut count = 0usize;
 
         for row in &rows_to_delete {
@@ -1020,8 +1334,12 @@ impl Database {
                 })
                 .collect();
 
-            let (new_table_root, new_index_roots) =
-                crate::exec::mutate::delete_row(&mut self.pager, &schema_for_write, &indexes_for_write, row)?;
+            let (new_table_root, new_index_roots) = crate::exec::mutate::delete_row(
+                &mut self.pager,
+                &schema_for_write,
+                &indexes_for_write,
+                row,
+            )?;
             table_root = new_table_root;
             for (name, root) in new_index_roots {
                 index_roots.insert(name, root);
@@ -1046,12 +1364,14 @@ impl Database {
         }
 
         if table_root != schema.root_page {
-            self.catalog.update_table_root(&mut self.pager, table, table_root)?;
+            self.catalog
+                .update_table_root(&mut self.pager, table, table_root)?;
         }
         for idx in &indexes {
             let new_root = index_roots[&idx.name];
             if new_root != idx.root_page {
-                self.catalog.update_index_root(&mut self.pager, &idx.name, new_root)?;
+                self.catalog
+                    .update_index_root(&mut self.pager, &idx.name, new_root)?;
             }
         }
 
@@ -1059,7 +1379,10 @@ impl Database {
     }
 
     pub fn list_tables(&mut self) -> Vec<String> {
-        let tables = self.catalog.list_tables(&mut self.pager).unwrap_or_default();
+        let tables = self
+            .catalog
+            .list_tables(&mut self.pager)
+            .unwrap_or_default();
         tables.into_iter().filter(|t| !t.starts_with('_')).collect()
     }
 
@@ -1068,7 +1391,9 @@ impl Database {
     }
 
     pub fn list_indexes(&mut self, table: &str) -> Vec<crate::types::schema::IndexSchema> {
-        self.catalog.list_indexes_for_table(&mut self.pager, table).unwrap_or_default()
+        self.catalog
+            .list_indexes_for_table(&mut self.pager, table)
+            .unwrap_or_default()
     }
 
     pub fn dump_table_btree(&mut self, table: &str) -> Option<String> {
@@ -1081,9 +1406,20 @@ impl Database {
         self.pager.stats()
     }
 
-    pub fn explain_statement(&mut self, stmt: &Statement, _ctx: &ExecutionContext) -> Result<Vec<String>> {
+    pub fn explain_statement(
+        &mut self,
+        stmt: &Statement,
+        _ctx: &ExecutionContext,
+    ) -> Result<Vec<String>> {
         match stmt {
-            Statement::Select { table, where_clause, order_by, limit, table_ref, .. } => {
+            Statement::Select {
+                table,
+                where_clause,
+                order_by,
+                limit,
+                table_ref,
+                ..
+            } => {
                 let mut lines = Vec::new();
                 let is_join = match &table_ref {
                     Some(crate::sql::ast::TableRef::Join { .. }) => true,
@@ -1092,17 +1428,33 @@ impl Database {
                 if is_join {
                     lines.push(format!("-> Join Execution: {table_ref:?}"));
                 } else if let Some(schema) = self.catalog.get_table(&mut self.pager, table)? {
-                    let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+                    let indexes = self
+                        .catalog
+                        .list_indexes_for_table(&mut self.pager, table)?;
                     let pk_col = &schema.columns[schema.primary_key_index()].name;
-                    let (pk_val, residual) = crate::plan::planner::extract_pk_equality(where_clause.clone(), pk_col);
+                    let (pk_val, residual) =
+                        crate::plan::planner::extract_pk_equality(where_clause.clone(), pk_col);
                     if let Some(v) = pk_val {
-                        lines.push(format!("-> TableSeek on {table} (cost=1.0..1.2 rows=1 width={})", schema.columns.len()));
+                        lines.push(format!(
+                            "-> TableSeek on {table} (cost=1.0..1.2 rows=1 width={})",
+                            schema.columns.len()
+                        ));
                         lines.push(format!("   Index Cond: ({pk_col} = {v:?})"));
-                    } else if let Some((idx_schema, val, _)) = crate::plan::planner::find_index_equality(residual, &indexes) {
-                        lines.push(format!("-> IndexSeek on {} using {} (cost=1.0..4.5 rows=10 width={})", table, idx_schema.name, schema.columns.len()));
+                    } else if let Some((idx_schema, val, _)) =
+                        crate::plan::planner::find_index_equality(residual, &indexes)
+                    {
+                        lines.push(format!(
+                            "-> IndexSeek on {} using {} (cost=1.0..4.5 rows=10 width={})",
+                            table,
+                            idx_schema.name,
+                            schema.columns.len()
+                        ));
                         lines.push(format!("   Index Cond: ({} = {val:?})", idx_schema.column));
                     } else {
-                        lines.push(format!("-> SeqScan on {table} (cost=0.0..25.0 rows=100 width={})", schema.columns.len()));
+                        lines.push(format!(
+                            "-> SeqScan on {table} (cost=0.0..25.0 rows=100 width={})",
+                            schema.columns.len()
+                        ));
                     }
                     if let Some(pred) = where_clause {
                         lines.push(format!("   Filter: {pred:?}"));
@@ -1111,22 +1463,33 @@ impl Database {
                     lines.push(format!("-> Scan on {table}"));
                 }
                 if let Some((col, desc)) = order_by {
-                    lines.push(format!("-> Sort by {col} {}", if *desc { "DESC" } else { "ASC" }));
+                    lines.push(format!(
+                        "-> Sort by {col} {}",
+                        if *desc { "DESC" } else { "ASC" }
+                    ));
                 }
                 if let Some(n) = limit {
                     lines.push(format!("-> Limit {n}"));
                 }
                 Ok(lines)
             }
-            Statement::Insert { table, rows, .. } => {
-                Ok(vec![format!("-> Insert into {table} (rows={})", rows.len())])
-            }
-            Statement::Update { table, where_clause, .. } => {
-                Ok(vec![format!("-> Update on {table} filter={where_clause:?}")])
-            }
-            Statement::Delete { table, where_clause } => {
-                Ok(vec![format!("-> Delete on {table} filter={where_clause:?}")])
-            }
+            Statement::Insert { table, rows, .. } => Ok(vec![format!(
+                "-> Insert into {table} (rows={})",
+                rows.len()
+            )]),
+            Statement::Update {
+                table,
+                where_clause,
+                ..
+            } => Ok(vec![format!(
+                "-> Update on {table} filter={where_clause:?}"
+            )]),
+            Statement::Delete {
+                table,
+                where_clause,
+            } => Ok(vec![format!(
+                "-> Delete on {table} filter={where_clause:?}"
+            )]),
             other => Ok(vec![format!("-> Execute statement: {other:?}")]),
         }
     }
@@ -1155,7 +1518,9 @@ fn literal_to_value_typed(expr: &Expr, target_type: Option<&ColumnType>) -> Resu
         Expr::StringLiteral(s) => match target_type {
             Some(ColumnType::Json) => {
                 serde_json::from_str::<serde_json::Value>(s).map_err(|e| {
-                    DbError::Exec(crate::error::ExecError::InvalidValue(format!("invalid JSON payload: {e}")))
+                    DbError::Exec(crate::error::ExecError::InvalidValue(format!(
+                        "invalid JSON payload: {e}"
+                    )))
                 })?;
                 Ok(Value::Json(s.clone()))
             }
@@ -1163,9 +1528,9 @@ fn literal_to_value_typed(expr: &Expr, target_type: Option<&ColumnType>) -> Resu
         },
         Expr::BoolLiteral(b) => Ok(Value::Boolean(*b)),
         Expr::Null => Ok(Value::Null),
-        other => Err(DbError::Exec(crate::error::ExecError::InvalidValue(format!(
-            "expected a literal value in statement, found {other:?}"
-        )))),
+        other => Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+            format!("expected a literal value in statement, found {other:?}"),
+        ))),
     }
 }
 
@@ -1179,7 +1544,8 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
         assert_eq!(
-            db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)").unwrap(),
+            db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+                .unwrap(),
             ExecResult::Ok
         );
         assert_eq!(db.execute("DROP TABLE users").unwrap(), ExecResult::Ok);
@@ -1197,9 +1563,15 @@ mod tests {
     fn create_duplicate_table_errors() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
-        let err = db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap_err();
-        assert!(matches!(err, DbError::Plan(PlanError::TableAlreadyExists(_))));
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let err = db
+            .execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DbError::Plan(PlanError::TableAlreadyExists(_))
+        ));
     }
 
     #[test]
@@ -1208,7 +1580,8 @@ mod tests {
         let path = file.path();
         {
             let mut db = Database::create(path).unwrap();
-            db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+            db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+                .unwrap();
         }
         let mut db = Database::open(path).unwrap();
         db.execute("DROP TABLE t").unwrap(); // succeeds only if the schema survived reopen
@@ -1218,19 +1591,24 @@ mod tests {
     fn insert_then_reinsert_same_pk_errors() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+            .unwrap();
         assert_eq!(
-            db.execute("INSERT INTO t (id, name) VALUES (1, 'a')").unwrap(),
+            db.execute("INSERT INTO t (id, name) VALUES (1, 'a')")
+                .unwrap(),
             ExecResult::Modified(1)
         );
-        assert!(db.execute("INSERT INTO t (id, name) VALUES (1, 'b')").is_err());
+        assert!(db
+            .execute("INSERT INTO t (id, name) VALUES (1, 'b')")
+            .is_err());
     }
 
     #[test]
     fn insert_many_rows_forces_table_split_and_still_works() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
         for i in 0..500 {
             let sql = format!("INSERT INTO t (id) VALUES ({i})");
             assert_eq!(db.execute(&sql).unwrap(), ExecResult::Modified(1));
@@ -1241,14 +1619,19 @@ mod tests {
     fn select_with_where_and_projection() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
-        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+            .unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+            .unwrap();
 
         let result = db.execute("SELECT name FROM t WHERE id > 1").unwrap();
         match result {
             ExecResult::Rows { columns, rows } => {
                 assert_eq!(columns, vec!["name".to_string()]);
-                assert_eq!(rows, vec![vec![Value::Text("b".into())], vec![Value::Text("c".into())]]);
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Text("b".into())], vec![Value::Text("c".into())]]
+                );
             }
             other => panic!("unexpected result: {other:?}"),
         }
@@ -1258,10 +1641,14 @@ mod tests {
     fn select_with_order_by_and_limit() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, score INTEGER)").unwrap();
-        db.execute("INSERT INTO t (id, score) VALUES (1, 30), (2, 10), (3, 20)").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, score INTEGER)")
+            .unwrap();
+        db.execute("INSERT INTO t (id, score) VALUES (1, 30), (2, 10), (3, 20)")
+            .unwrap();
 
-        let result = db.execute("SELECT id FROM t ORDER BY score LIMIT 2").unwrap();
+        let result = db
+            .execute("SELECT id FROM t ORDER BY score LIMIT 2")
+            .unwrap();
         match result {
             ExecResult::Rows { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Integer(2)], vec![Value::Integer(3)]]);
@@ -1274,15 +1661,26 @@ mod tests {
     fn delete_removes_matching_rows_only() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
-        db.execute("INSERT INTO t (id) VALUES (1), (2), (3)").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        db.execute("INSERT INTO t (id) VALUES (1), (2), (3)")
+            .unwrap();
 
-        assert_eq!(db.execute("DELETE FROM t WHERE id = 2").unwrap(), ExecResult::Modified(1));
+        assert_eq!(
+            db.execute("DELETE FROM t WHERE id = 2").unwrap(),
+            ExecResult::Modified(1)
+        );
 
         let result = db.execute("SELECT id FROM t").unwrap();
         match result {
             ExecResult::Rows { rows, .. } => {
-                let mut remaining: Vec<i64> = rows.iter().map(|r| match &r[0] { Value::Integer(n) => *n, _ => unreachable!() }).collect();
+                let mut remaining: Vec<i64> = rows
+                    .iter()
+                    .map(|r| match &r[0] {
+                        Value::Integer(n) => *n,
+                        _ => unreachable!(),
+                    })
+                    .collect();
                 remaining.sort();
                 assert_eq!(remaining, vec![1, 3]);
             }
@@ -1294,10 +1692,15 @@ mod tests {
     fn update_changes_matching_rows_only() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
-        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b')").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+            .unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b')")
+            .unwrap();
 
-        assert_eq!(db.execute("UPDATE t SET name = 'z' WHERE id = 1").unwrap(), ExecResult::Modified(1));
+        assert_eq!(
+            db.execute("UPDATE t SET name = 'z' WHERE id = 1").unwrap(),
+            ExecResult::Modified(1)
+        );
 
         let result = db.execute("SELECT id, name FROM t WHERE id = 1").unwrap();
         match result {
@@ -1317,10 +1720,15 @@ mod tests {
     fn create_index_on_existing_rows_then_drop_it() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
-        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b')").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            .unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b')")
+            .unwrap();
 
-        assert_eq!(db.execute("CREATE INDEX idx_name ON t (name)").unwrap(), ExecResult::Ok);
+        assert_eq!(
+            db.execute("CREATE INDEX idx_name ON t (name)").unwrap(),
+            ExecResult::Ok
+        );
         assert_eq!(db.execute("DROP INDEX idx_name").unwrap(), ExecResult::Ok);
     }
 
@@ -1328,7 +1736,8 @@ mod tests {
     fn create_index_on_nullable_column_errors() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+            .unwrap();
         let err = db.execute("CREATE INDEX idx_name ON t (name)").unwrap_err();
         assert!(matches!(err, DbError::Plan(PlanError::InvalidSchema(_))));
     }
@@ -1337,14 +1746,22 @@ mod tests {
     fn select_on_indexed_column_uses_index_and_returns_correct_rows() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
-        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'a')").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            .unwrap();
+        db.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'a')")
+            .unwrap();
         db.execute("CREATE INDEX idx_name ON t (name)").unwrap();
 
         let result = db.execute("SELECT id FROM t WHERE name = 'a'").unwrap();
         match result {
             ExecResult::Rows { rows, .. } => {
-                let mut ids: Vec<i64> = rows.iter().map(|r| match &r[0] { Value::Integer(n) => *n, _ => unreachable!() }).collect();
+                let mut ids: Vec<i64> = rows
+                    .iter()
+                    .map(|r| match &r[0] {
+                        Value::Integer(n) => *n,
+                        _ => unreachable!(),
+                    })
+                    .collect();
                 ids.sort();
                 assert_eq!(ids, vec![1, 3]);
             }
@@ -1358,15 +1775,19 @@ mod tests {
         let path = file.path();
         {
             let mut db = Database::create(path).unwrap();
-            db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)").unwrap();
+            db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+                .unwrap();
             db.execute("BEGIN").unwrap();
-            db.execute("INSERT INTO t (id, val) VALUES (1, 'committed')").unwrap();
+            db.execute("INSERT INTO t (id, val) VALUES (1, 'committed')")
+                .unwrap();
             db.execute("COMMIT").unwrap();
         }
         let mut db = Database::open(path).unwrap();
         let res = db.execute("SELECT val FROM t WHERE id = 1").unwrap();
         match res {
-            ExecResult::Rows { rows, .. } => assert_eq!(rows, vec![vec![Value::Text("committed".into())]]),
+            ExecResult::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("committed".into())]])
+            }
             other => panic!("unexpected result: {other:?}"),
         }
     }
@@ -1376,17 +1797,23 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let path = file.path();
         let mut db = Database::create(path).unwrap();
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)").unwrap();
-        db.execute("INSERT INTO t (id, val) VALUES (1, 'initial')").unwrap();
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        db.execute("INSERT INTO t (id, val) VALUES (1, 'initial')")
+            .unwrap();
 
         db.execute("BEGIN").unwrap();
-        db.execute("UPDATE t SET val = 'modified' WHERE id = 1").unwrap();
-        db.execute("INSERT INTO t (id, val) VALUES (2, 'new')").unwrap();
+        db.execute("UPDATE t SET val = 'modified' WHERE id = 1")
+            .unwrap();
+        db.execute("INSERT INTO t (id, val) VALUES (2, 'new')")
+            .unwrap();
         db.execute("ROLLBACK").unwrap();
 
         let res = db.execute("SELECT val FROM t WHERE id = 1").unwrap();
         match res {
-            ExecResult::Rows { rows, .. } => assert_eq!(rows, vec![vec![Value::Text("initial".into())]]),
+            ExecResult::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("initial".into())]])
+            }
             other => panic!("unexpected result: {other:?}"),
         }
         let res2 = db.execute("SELECT * FROM t WHERE id = 2").unwrap();
@@ -1401,10 +1828,12 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let path = file.path();
         let mut db = Database::create(path).unwrap();
-        db.execute("CREATE TABLE t1 (id INTEGER PRIMARY KEY)").unwrap();
+        db.execute("CREATE TABLE t1 (id INTEGER PRIMARY KEY)")
+            .unwrap();
 
         db.execute("BEGIN").unwrap();
-        db.execute("CREATE TABLE t2 (id INTEGER PRIMARY KEY)").unwrap();
+        db.execute("CREATE TABLE t2 (id INTEGER PRIMARY KEY)")
+            .unwrap();
         db.execute("DROP TABLE t1").unwrap();
         db.execute("ROLLBACK").unwrap();
 
@@ -1415,11 +1844,20 @@ mod tests {
     fn nested_begin_and_naked_commit_error() {
         let file = NamedTempFile::new().unwrap();
         let mut db = Database::create(file.path()).unwrap();
-        assert!(matches!(db.execute("COMMIT").unwrap_err(), DbError::Plan(PlanError::NoTransactionInProgress)));
-        assert!(matches!(db.execute("ROLLBACK").unwrap_err(), DbError::Plan(PlanError::NoTransactionInProgress)));
+        assert!(matches!(
+            db.execute("COMMIT").unwrap_err(),
+            DbError::Plan(PlanError::NoTransactionInProgress)
+        ));
+        assert!(matches!(
+            db.execute("ROLLBACK").unwrap_err(),
+            DbError::Plan(PlanError::NoTransactionInProgress)
+        ));
 
         db.execute("BEGIN").unwrap();
-        assert!(matches!(db.execute("BEGIN").unwrap_err(), DbError::Plan(PlanError::NestedTransactionNotSupported)));
+        assert!(matches!(
+            db.execute("BEGIN").unwrap_err(),
+            DbError::Plan(PlanError::NestedTransactionNotSupported)
+        ));
         db.execute("ROLLBACK").unwrap();
     }
 

@@ -39,7 +39,9 @@ impl LeafNode {
             let key = page.read_bytes(cell_offset + 2, key_len).to_vec();
             let payload_len_offset = cell_offset + 2 + key_len;
             let payload_len = page.read_u16(payload_len_offset) as usize;
-            let payload = page.read_bytes(payload_len_offset + 2, payload_len).to_vec();
+            let payload = page
+                .read_bytes(payload_len_offset + 2, payload_len)
+                .to_vec();
             entries.push(LeafEntry { key, payload });
         }
         LeafNode { entries, next_leaf }
@@ -67,7 +69,11 @@ impl LeafNode {
     }
 
     pub fn encoded_size(&self) -> usize {
-        let cells: usize = self.entries.iter().map(|e| 2 + e.key.len() + 2 + e.payload.len()).sum();
+        let cells: usize = self
+            .entries
+            .iter()
+            .map(|e| 2 + e.key.len() + 2 + e.payload.len())
+            .sum();
         NODE_HEADER_SIZE + self.entries.len() * 2 + cells
     }
 }
@@ -86,7 +92,10 @@ impl InternalNode {
             let left_child = page.read_u32(cell_offset + 2 + key_len);
             entries.push(InternalEntry { key, left_child });
         }
-        InternalNode { entries, rightmost_child }
+        InternalNode {
+            entries,
+            rightmost_child,
+        }
     }
 
     pub fn encode(&self, page: &mut Page) {
@@ -132,8 +141,14 @@ mod tests {
     fn leaf_encode_decode_roundtrip() {
         let node = LeafNode {
             entries: vec![
-                LeafEntry { key: vec![1, 2], payload: vec![9, 9, 9] },
-                LeafEntry { key: vec![1, 2, 3], payload: vec![] },
+                LeafEntry {
+                    key: vec![1, 2],
+                    payload: vec![9, 9, 9],
+                },
+                LeafEntry {
+                    key: vec![1, 2, 3],
+                    payload: vec![],
+                },
             ],
             next_leaf: 42,
         };
@@ -149,8 +164,14 @@ mod tests {
     fn internal_encode_decode_roundtrip() {
         let node = InternalNode {
             entries: vec![
-                InternalEntry { key: vec![5], left_child: 1 },
-                InternalEntry { key: vec![10], left_child: 2 },
+                InternalEntry {
+                    key: vec![5],
+                    left_child: 1,
+                },
+                InternalEntry {
+                    key: vec![10],
+                    left_child: 2,
+                },
             ],
             rightmost_child: 3,
         };
@@ -166,8 +187,14 @@ mod tests {
     fn child_for_key_routes_correctly() {
         let node = InternalNode {
             entries: vec![
-                InternalEntry { key: vec![5], left_child: 100 },
-                InternalEntry { key: vec![10], left_child: 200 },
+                InternalEntry {
+                    key: vec![5],
+                    left_child: 100,
+                },
+                InternalEntry {
+                    key: vec![10],
+                    left_child: 200,
+                },
             ],
             rightmost_child: 300,
         };

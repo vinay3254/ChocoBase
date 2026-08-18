@@ -86,16 +86,22 @@ impl JournalHeader {
         file.read_exact(&mut buf)?;
 
         if &buf[0..8] != JOURNAL_MAGIC {
-            return Err(StorageError::CorruptJournal("invalid journal magic bytes".into()));
+            return Err(StorageError::CorruptJournal(
+                "invalid journal magic bytes".into(),
+            ));
         }
         let version = u16::from_be_bytes(buf[8..10].try_into().unwrap());
         if version != JOURNAL_VERSION {
-            return Err(StorageError::CorruptJournal(format!("unsupported journal version {version}")));
+            return Err(StorageError::CorruptJournal(format!(
+                "unsupported journal version {version}"
+            )));
         }
         let stored_crc = u32::from_be_bytes(buf[20..24].try_into().unwrap());
         let computed_crc = crc32(&buf[0..20]);
         if stored_crc != computed_crc {
-            return Err(StorageError::CorruptJournal("journal header checksum mismatch".into()));
+            return Err(StorageError::CorruptJournal(
+                "journal header checksum mismatch".into(),
+            ));
         }
 
         let orig_page_count = u32::from_be_bytes(buf[12..16].try_into().unwrap());
@@ -136,11 +142,7 @@ impl Journal {
         header.write_to(&mut file)?;
         file.sync_all()?;
 
-        Ok(Journal {
-            file,
-            path,
-            header,
-        })
+        Ok(Journal { file, path, header })
     }
 
     pub fn append_page(&mut self, page_no: u32, page: &Page) -> Result<(), StorageError> {
@@ -217,7 +219,11 @@ pub fn recover_if_needed(db_path: &Path) -> Result<(), StorageError> {
             Ok(()) => {
                 let page_no = u32::from_be_bytes(record_buf[0..4].try_into().unwrap());
                 let page_data = &record_buf[4..4 + PAGE_SIZE];
-                let stored_crc = u32::from_be_bytes(record_buf[4 + PAGE_SIZE..4 + PAGE_SIZE + 4].try_into().unwrap());
+                let stored_crc = u32::from_be_bytes(
+                    record_buf[4 + PAGE_SIZE..4 + PAGE_SIZE + 4]
+                        .try_into()
+                        .unwrap(),
+                );
                 let computed_crc = crc32(page_data);
                 if stored_crc != computed_crc {
                     // Semantics: Stop at the first checksum failure. Do not skip to avoid torn state.
@@ -259,7 +265,11 @@ mod tests {
         let db_path = db_temp.path();
 
         // 1. Initialize a 3-page database file
-        let mut db_file = OpenOptions::new().read(true).write(true).open(db_path).unwrap();
+        let mut db_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(db_path)
+            .unwrap();
         let page0 = [10u8; PAGE_SIZE];
         let page1 = [20u8; PAGE_SIZE];
         let page2 = [30u8; PAGE_SIZE];
@@ -270,7 +280,12 @@ mod tests {
 
         // 2. Create a journal with 2 valid records (for page 1 and page 2)
         let jnl_path = journal_path_for(db_path);
-        let mut jnl_file = OpenOptions::new().read(true).write(true).create(true).open(&jnl_path).unwrap();
+        let mut jnl_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&jnl_path)
+            .unwrap();
 
         let header = JournalHeader::new(3);
         header.write_to(&mut jnl_file).unwrap();
@@ -311,12 +326,16 @@ mod tests {
         // 5. Verify pre-images for page 1 and page 2 were restored
         let mut restored_db = File::open(db_path).unwrap();
         let mut buf1 = [0u8; PAGE_SIZE];
-        restored_db.seek(SeekFrom::Start(1 * PAGE_SIZE as u64)).unwrap();
+        restored_db
+            .seek(SeekFrom::Start(1 * PAGE_SIZE as u64))
+            .unwrap();
         restored_db.read_exact(&mut buf1).unwrap();
         assert_eq!(buf1, page1);
 
         let mut buf2 = [0u8; PAGE_SIZE];
-        restored_db.seek(SeekFrom::Start(2 * PAGE_SIZE as u64)).unwrap();
+        restored_db
+            .seek(SeekFrom::Start(2 * PAGE_SIZE as u64))
+            .unwrap();
         restored_db.read_exact(&mut buf2).unwrap();
         assert_eq!(buf2, page2);
 

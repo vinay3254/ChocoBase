@@ -30,8 +30,13 @@ impl Operator for ProjectExpr {
             Some(row) => {
                 let mut out = Vec::with_capacity(self.exprs.len());
                 for expr in &self.exprs {
-                    let val = crate::plan::expr::eval_with_context(expr, &self.schema, &row, &self.context)
-                        .map_err(|e| ExecError::InvalidValue(e.to_string()))?;
+                    let val = crate::plan::expr::eval_with_context(
+                        expr,
+                        &self.schema,
+                        &row,
+                        &self.context,
+                    )
+                    .map_err(|e| ExecError::InvalidValue(e.to_string()))?;
                     out.push(val);
                 }
                 Ok(Some(out))
@@ -58,8 +63,15 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let mut pager = crate::storage::pager::Pager::create(file.path()).unwrap();
 
-        let input = Fixed(vec![vec![Value::Integer(1), Value::Text("a".into()), Value::Boolean(true)]]);
-        let mut project = Project { input: Box::new(input), indices: vec![2, 0] };
+        let input = Fixed(vec![vec![
+            Value::Integer(1),
+            Value::Text("a".into()),
+            Value::Boolean(true),
+        ]]);
+        let mut project = Project {
+            input: Box::new(input),
+            indices: vec![2, 0],
+        };
         let row = project.next(&mut pager).unwrap().unwrap();
         assert_eq!(row, vec![Value::Boolean(true), Value::Integer(1)]);
     }

@@ -32,7 +32,12 @@ async fn send_http_request(
     let resp_str = String::from_utf8_lossy(&buf);
     let mut lines = resp_str.lines();
     let status_line = lines.next().unwrap();
-    let status_code: u16 = status_line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
 
     let body_idx = resp_str.find("\r\n\r\n").unwrap() + 4;
     let json_body: serde_json::Value = serde_json::from_str(&resp_str[body_idx..]).unwrap();
@@ -221,7 +226,8 @@ async fn http_gateway_end_to_end_rest_api() {
     assert!(refresh_res["access_token"].is_string());
 
     // 11. RPC endpoint via POST /v1/rpc/version
-    let (code, rpc_res) = send_http_request(bound_addr, "POST", "/v1/rpc/version", None, None).await;
+    let (code, rpc_res) =
+        send_http_request(bound_addr, "POST", "/v1/rpc/version", None, None).await;
     assert_eq!(code, 200);
     assert_eq!(rpc_res["version"], "0.1.0");
 
@@ -239,7 +245,10 @@ async fn http_gateway_end_to_end_rest_api() {
 
     // 13. Admin Studio Dashboard via GET /dashboard
     let mut stream = TcpStream::connect(bound_addr).await.unwrap();
-    stream.write_all(b"GET /dashboard HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+    stream
+        .write_all(b"GET /dashboard HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.unwrap();
     let resp = String::from_utf8_lossy(&buf);

@@ -88,10 +88,12 @@ impl Operator for NestedLoopJoin {
                 combined.extend(r_row.iter().cloned());
 
                 let is_match = match &self.condition {
-                    Some(cond) => match crate::plan::expr::eval(cond, &self.combined_schema, &combined) {
-                        Ok(v) => crate::plan::expr::is_truthy(&v),
-                        Err(_) => false,
-                    },
+                    Some(cond) => {
+                        match crate::plan::expr::eval(cond, &self.combined_schema, &combined) {
+                            Ok(v) => crate::plan::expr::is_truthy(&v),
+                            Err(_) => false,
+                        }
+                    }
                     None => true,
                 };
 

@@ -47,7 +47,10 @@ pub fn sql_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Text(x), Value::Text(y)) => x.cmp(y),
         (Value::Json(x), Value::Json(y)) => x.cmp(y),
         (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
-        _ => panic!("cannot compare values of different types: {:?} vs {:?}", a, b),
+        _ => panic!(
+            "cannot compare values of different types: {:?} vs {:?}",
+            a, b
+        ),
     }
 }
 

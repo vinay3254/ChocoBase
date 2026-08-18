@@ -10,9 +10,11 @@ use tempfile::NamedTempFile;
 fn make_db_with_rows(rows: &[(i64, i64)]) -> (Database, NamedTempFile) {
     let file = NamedTempFile::new().unwrap();
     let mut db = Database::create(file.path()).unwrap();
-    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, score INTEGER NOT NULL)").unwrap();
+    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, score INTEGER NOT NULL)")
+        .unwrap();
     for (id, score) in rows {
-        db.execute(&format!("INSERT INTO t (id, score) VALUES ({id}, {score})")).unwrap();
+        db.execute(&format!("INSERT INTO t (id, score) VALUES ({id}, {score})"))
+            .unwrap();
     }
     (db, file)
 }

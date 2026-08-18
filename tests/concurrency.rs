@@ -1,13 +1,14 @@
 use dbengine::{ExecResult, SharedDatabase};
-use tempfile::NamedTempFile;
 use std::sync::{Arc, Barrier};
 use std::thread;
+use tempfile::NamedTempFile;
 
 #[test]
 fn shared_database_serializes_writers_and_allows_concurrent_clients() {
     let file = NamedTempFile::new().unwrap();
     let db = SharedDatabase::create(file.path()).unwrap();
-    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL)").unwrap();
+    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, worker INTEGER NOT NULL)")
+        .unwrap();
 
     let workers = 4;
     let per_worker = 40;
@@ -20,7 +21,11 @@ fn shared_database_serializes_writers_and_allows_concurrent_clients() {
             start.wait();
             for offset in 0..per_worker {
                 let id = worker * per_worker + offset;
-                session.execute(&format!("INSERT INTO t (id, worker) VALUES ({id}, {worker})")).unwrap();
+                session
+                    .execute(&format!(
+                        "INSERT INTO t (id, worker) VALUES ({id}, {worker})"
+                    ))
+                    .unwrap();
             }
         }));
     }
@@ -40,9 +45,14 @@ fn shared_database_serializes_writers_and_allows_concurrent_clients() {
     });
 
     barrier.wait();
-    for handle in handles { handle.join().unwrap(); }
+    for handle in handles {
+        handle.join().unwrap();
+    }
     let observed = reader_handle.join().unwrap();
-    assert!(observed > 0, "reader should make progress while writers run");
+    assert!(
+        observed > 0,
+        "reader should make progress while writers run"
+    );
 
     match db.execute("SELECT id FROM t").unwrap() {
         ExecResult::Rows { rows, .. } => assert_eq!(rows.len(), workers * per_worker),
@@ -54,7 +64,8 @@ fn shared_database_serializes_writers_and_allows_concurrent_clients() {
 fn explicit_shared_transaction_holds_writer_lock_until_commit() {
     let file = NamedTempFile::new().unwrap();
     let db = SharedDatabase::create(file.path()).unwrap();
-    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        .unwrap();
     let tx = db.clone();
     tx.execute("BEGIN").unwrap();
     tx.execute("INSERT INTO t (id) VALUES (1)").unwrap();
@@ -62,7 +73,10 @@ fn explicit_shared_transaction_holds_writer_lock_until_commit() {
     let other = db.clone();
     let handle = thread::spawn(move || other.execute("INSERT INTO t (id) VALUES (2)").unwrap());
     thread::sleep(std::time::Duration::from_millis(50));
-    assert!(!handle.is_finished(), "writer must wait for the explicit transaction");
+    assert!(
+        !handle.is_finished(),
+        "writer must wait for the explicit transaction"
+    );
     tx.execute("COMMIT").unwrap();
     handle.join().unwrap();
 }
@@ -71,12 +85,15 @@ fn explicit_shared_transaction_holds_writer_lock_until_commit() {
 fn explicit_shared_transaction_rollback_releases_lock_and_discards_data() {
     let file = NamedTempFile::new().unwrap();
     let db = SharedDatabase::create(file.path()).unwrap();
-    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)").unwrap();
-    db.execute("INSERT INTO t (id, val) VALUES (1, 'initial')").unwrap();
+    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+        .unwrap();
+    db.execute("INSERT INTO t (id, val) VALUES (1, 'initial')")
+        .unwrap();
 
     let tx = db.clone();
     tx.execute("BEGIN").unwrap();
-    tx.execute("UPDATE t SET val = 'modified' WHERE id = 1").unwrap();
+    tx.execute("UPDATE t SET val = 'modified' WHERE id = 1")
+        .unwrap();
 
     let reader = db.clone();
     let handle = thread::spawn(move || {
@@ -88,9 +105,15 @@ fn explicit_shared_transaction_rollback_releases_lock_and_discards_data() {
     });
 
     thread::sleep(std::time::Duration::from_millis(50));
-    assert!(!handle.is_finished(), "reader must wait for the exclusive transaction");
+    assert!(
+        !handle.is_finished(),
+        "reader must wait for the exclusive transaction"
+    );
 
     tx.execute("ROLLBACK").unwrap();
     let read_val = handle.join().unwrap();
-    assert_eq!(read_val, dbengine::types::value::Value::Text("initial".into()));
+    assert_eq!(
+        read_val,
+        dbengine::types::value::Value::Text("initial".into())
+    );
 }

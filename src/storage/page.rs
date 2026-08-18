@@ -10,7 +10,9 @@ pub struct Page {
 
 impl Page {
     pub fn zeroed() -> Self {
-        Page { data: [0u8; PAGE_SIZE] }
+        Page {
+            data: [0u8; PAGE_SIZE],
+        }
     }
 
     pub fn read_u8(&self, offset: usize) -> u8 {

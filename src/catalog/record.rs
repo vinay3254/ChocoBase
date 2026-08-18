@@ -78,10 +78,24 @@ pub fn decode_table_record(data: &[u8]) -> TableSchema {
         pos += 1;
         let is_primary_key = data[pos] != 0;
         pos += 1;
-        columns.push(Column { name: cname, ty, not_null, is_primary_key });
+        columns.push(Column {
+            name: cname,
+            ty,
+            not_null,
+            is_primary_key,
+        });
     }
-    let rls_enabled = if pos < data.len() { data[pos] != 0 } else { false };
-    TableSchema { name, columns, root_page, rls_enabled }
+    let rls_enabled = if pos < data.len() {
+        data[pos] != 0
+    } else {
+        false
+    };
+    TableSchema {
+        name,
+        columns,
+        root_page,
+        rls_enabled,
+    }
 }
 
 pub fn encode_index_record(schema: &IndexSchema) -> Vec<u8> {
@@ -103,7 +117,12 @@ pub fn decode_index_record(data: &[u8]) -> IndexSchema {
     let (column, next) = read_string(data, pos);
     pos = next;
     let root_page = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-    IndexSchema { name, table, column, root_page }
+    IndexSchema {
+        name,
+        table,
+        column,
+        root_page,
+    }
 }
 
 pub fn encode_policy_record(schema: &PolicySchema) -> Vec<u8> {
@@ -146,7 +165,13 @@ pub fn decode_policy_record(data: &[u8]) -> PolicySchema {
     let (check_json, _) = read_string(data, pos);
     let with_check = serde_json::from_str(&check_json).ok().flatten();
 
-    PolicySchema { name, table, cmd, using_expr, with_check }
+    PolicySchema {
+        name,
+        table,
+        cmd,
+        using_expr,
+        with_check,
+    }
 }
 
 #[cfg(test)]
@@ -158,8 +183,18 @@ mod tests {
         let schema = TableSchema {
             name: "users".into(),
             columns: vec![
-                Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true },
-                Column { name: "email".into(), ty: ColumnType::Text, not_null: false, is_primary_key: false },
+                Column {
+                    name: "id".into(),
+                    ty: ColumnType::Integer,
+                    not_null: true,
+                    is_primary_key: true,
+                },
+                Column {
+                    name: "email".into(),
+                    ty: ColumnType::Text,
+                    not_null: false,
+                    is_primary_key: false,
+                },
             ],
             root_page: 7,
             rls_enabled: true,

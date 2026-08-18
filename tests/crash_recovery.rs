@@ -12,8 +12,10 @@ fn child_process_killed_mid_transaction_is_recovered_on_reopen() {
     // 1. Initial setup in parent process: create table and insert 1 row
     {
         let mut db = Database::create(std::path::Path::new(&db_path)).unwrap();
-        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
-        db.execute("INSERT INTO users (id, name) VALUES (1, 'alice')").unwrap();
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+            .unwrap();
+        db.execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+            .unwrap();
     }
 
     // 2. Spawn a child CLI process that begins a transaction, modifies rows, and waits
@@ -41,7 +43,8 @@ fn child_process_killed_mid_transaction_is_recovered_on_reopen() {
     let _ = child.wait();
 
     // 4. Open the database in the parent process: startup recovery must detect and undo the transaction
-    let mut db = Database::open(std::path::Path::new(&db_path)).expect("Database::open failed after crash");
+    let mut db =
+        Database::open(std::path::Path::new(&db_path)).expect("Database::open failed after crash");
 
     // 5. Verify the pre-transaction state was restored: id=1 is 'alice', id=2 does not exist
     let res = db.execute("SELECT name FROM users WHERE id = 1").unwrap();

@@ -10,7 +10,11 @@ use crate::server::protocol::{read_request, write_response, Request, Response};
 /// Handles an incoming TCP connection session, with the first byte already consumed by
 /// the protocol dispatcher. `prefix_byte` is prepended to the session's read buffer so
 /// the JSON framing parser sees the complete message.
-pub async fn handle_session_with_prefix(socket: TcpStream, db: SharedDatabase, prefix_byte: u8) -> io::Result<()> {
+pub async fn handle_session_with_prefix(
+    socket: TcpStream,
+    db: SharedDatabase,
+    prefix_byte: u8,
+) -> io::Result<()> {
     let (reader, writer) = socket.into_split();
     // Pre-populate the protocol read buffer with the already-consumed first byte.
     // This is simpler and avoids Chain<Cursor, OwnedReadHalf> type complexity.
@@ -28,7 +32,12 @@ pub async fn handle_session(socket: TcpStream, db: SharedDatabase) -> io::Result
 
 /// Core session loop: reads requests from `reader`, executes them, writes responses to `writer`.
 /// `initial_buffer` pre-populates the protocol read buffer (e.g. to re-inject a consumed first byte).
-async fn run_session<R, W>(mut reader: R, mut writer: W, db: SharedDatabase, mut buffer: Vec<u8>) -> io::Result<()>
+async fn run_session<R, W>(
+    mut reader: R,
+    mut writer: W,
+    db: SharedDatabase,
+    mut buffer: Vec<u8>,
+) -> io::Result<()>
 where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,

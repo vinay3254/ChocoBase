@@ -17,10 +17,16 @@ impl Catalog {
     pub fn bootstrap(pager: &mut Pager) -> Result<Catalog, DbError> {
         if pager.catalog_root() == 0 {
             let root_page = pager.allocate_page()?;
-            LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(root_page)?);
+            LeafNode {
+                entries: vec![],
+                next_leaf: 0,
+            }
+            .encode(pager.get_page_mut(root_page)?);
             pager.set_catalog_root(root_page)?;
         }
-        Ok(Catalog { root: pager.catalog_root() })
+        Ok(Catalog {
+            root: pager.catalog_root(),
+        })
     }
 
     fn table_key(name: &str) -> Vec<u8> {
@@ -34,22 +40,34 @@ impl Catalog {
     pub fn create_table(&mut self, pager: &mut Pager, schema: &TableSchema) -> Result<(), DbError> {
         let key = Self::table_key(&schema.name);
         let mut bt = BTree::new(pager, self.root);
-        bt.insert(&key, &encode_table_record(schema)).map_err(|e| match e {
-            BTreeError::DuplicateKey => DbError::Plan(PlanError::TableAlreadyExists(schema.name.clone())),
-            other => DbError::BTree(other),
-        })?;
+        bt.insert(&key, &encode_table_record(schema))
+            .map_err(|e| match e {
+                BTreeError::DuplicateKey => {
+                    DbError::Plan(PlanError::TableAlreadyExists(schema.name.clone()))
+                }
+                other => DbError::BTree(other),
+            })?;
         self.root = bt.root();
         pager.set_catalog_root(self.root)?;
         Ok(())
     }
 
-    pub fn get_table(&mut self, pager: &mut Pager, name: &str) -> Result<Option<TableSchema>, DbError> {
+    pub fn get_table(
+        &mut self,
+        pager: &mut Pager,
+        name: &str,
+    ) -> Result<Option<TableSchema>, DbError> {
         let key = Self::table_key(name);
         let mut bt = BTree::new(pager, self.root);
         Ok(bt.search(&key)?.map(|p| decode_table_record(&p)))
     }
 
-    pub fn update_table_root(&mut self, pager: &mut Pager, name: &str, new_root: u32) -> Result<(), DbError> {
+    pub fn update_table_root(
+        &mut self,
+        pager: &mut Pager,
+        name: &str,
+        new_root: u32,
+    ) -> Result<(), DbError> {
         let mut schema = self
             .get_table(pager, name)?
             .ok_or_else(|| PlanError::NoSuchTable(name.to_string()))?;
@@ -82,22 +100,34 @@ impl Catalog {
     pub fn create_index(&mut self, pager: &mut Pager, schema: &IndexSchema) -> Result<(), DbError> {
         let key = Self::index_key(&schema.name);
         let mut bt = BTree::new(pager, self.root);
-        bt.insert(&key, &encode_index_record(schema)).map_err(|e| match e {
-            BTreeError::DuplicateKey => DbError::Plan(PlanError::IndexAlreadyExists(schema.name.clone())),
-            other => DbError::BTree(other),
-        })?;
+        bt.insert(&key, &encode_index_record(schema))
+            .map_err(|e| match e {
+                BTreeError::DuplicateKey => {
+                    DbError::Plan(PlanError::IndexAlreadyExists(schema.name.clone()))
+                }
+                other => DbError::BTree(other),
+            })?;
         self.root = bt.root();
         pager.set_catalog_root(self.root)?;
         Ok(())
     }
 
-    pub fn get_index(&mut self, pager: &mut Pager, name: &str) -> Result<Option<IndexSchema>, DbError> {
+    pub fn get_index(
+        &mut self,
+        pager: &mut Pager,
+        name: &str,
+    ) -> Result<Option<IndexSchema>, DbError> {
         let key = Self::index_key(name);
         let mut bt = BTree::new(pager, self.root);
         Ok(bt.search(&key)?.map(|p| decode_index_record(&p)))
     }
 
-    pub fn update_index_root(&mut self, pager: &mut Pager, name: &str, new_root: u32) -> Result<(), DbError> {
+    pub fn update_index_root(
+        &mut self,
+        pager: &mut Pager,
+        name: &str,
+        new_root: u32,
+    ) -> Result<(), DbError> {
         let mut schema = self
             .get_index(pager, name)?
             .ok_or_else(|| PlanError::NoSuchIndex(name.to_string()))?;
@@ -138,7 +168,11 @@ impl Catalog {
         Ok(names)
     }
 
-    pub fn list_indexes_for_table(&mut self, pager: &mut Pager, table: &str) -> Result<Vec<IndexSchema>, DbError> {
+    pub fn list_indexes_for_table(
+        &mut self,
+        pager: &mut Pager,
+        table: &str,
+    ) -> Result<Vec<IndexSchema>, DbError> {
         let mut cursor = {
             let mut bt = BTree::new(pager, self.root);
             bt.cursor_start()?
@@ -159,7 +193,12 @@ impl Catalog {
         encode_key(&Value::Text(format!("policy:{name}")))
     }
 
-    pub fn set_table_rls(&mut self, pager: &mut Pager, table: &str, enabled: bool) -> Result<(), DbError> {
+    pub fn set_table_rls(
+        &mut self,
+        pager: &mut Pager,
+        table: &str,
+        enabled: bool,
+    ) -> Result<(), DbError> {
         let mut schema = self
             .get_table(pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
@@ -173,13 +212,20 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn create_policy(&mut self, pager: &mut Pager, policy: &PolicySchema) -> Result<(), DbError> {
+    pub fn create_policy(
+        &mut self,
+        pager: &mut Pager,
+        policy: &PolicySchema,
+    ) -> Result<(), DbError> {
         let key = Self::policy_key(&policy.name);
         let mut bt = BTree::new(pager, self.root);
-        bt.insert(&key, &encode_policy_record(policy)).map_err(|e| match e {
-            BTreeError::DuplicateKey => DbError::Plan(PlanError::TableAlreadyExists(policy.name.clone())),
-            other => DbError::BTree(other),
-        })?;
+        bt.insert(&key, &encode_policy_record(policy))
+            .map_err(|e| match e {
+                BTreeError::DuplicateKey => {
+                    DbError::Plan(PlanError::TableAlreadyExists(policy.name.clone()))
+                }
+                other => DbError::BTree(other),
+            })?;
         self.root = bt.root();
         pager.set_catalog_root(self.root)?;
         Ok(())
@@ -194,7 +240,11 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn list_policies_for_table(&mut self, pager: &mut Pager, table: &str) -> Result<Vec<PolicySchema>, DbError> {
+    pub fn list_policies_for_table(
+        &mut self,
+        pager: &mut Pager,
+        table: &str,
+    ) -> Result<Vec<PolicySchema>, DbError> {
         let mut cursor = {
             let mut bt = BTree::new(pager, self.root);
             bt.cursor_start()?
@@ -241,9 +291,12 @@ mod tests {
     fn sample_schema(name: &str) -> TableSchema {
         TableSchema {
             name: name.into(),
-            columns: vec![
-                Column { name: "id".into(), ty: ColumnType::Integer, not_null: true, is_primary_key: true },
-            ],
+            columns: vec![Column {
+                name: "id".into(),
+                ty: ColumnType::Integer,
+                not_null: true,
+                is_primary_key: true,
+            }],
             root_page: 0, // filled in by the caller after allocating a table root
             rls_enabled: false,
         }
@@ -256,7 +309,11 @@ mod tests {
         let mut catalog = Catalog::bootstrap(&mut pager).unwrap();
 
         let table_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(table_root).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(table_root).unwrap());
         let mut schema = sample_schema("users");
         schema.root_page = table_root;
         catalog.create_table(&mut pager, &schema).unwrap();
@@ -274,10 +331,17 @@ mod tests {
         let mut catalog = Catalog::bootstrap(&mut pager).unwrap();
         let mut schema = sample_schema("users");
         schema.root_page = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(schema.root_page).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(schema.root_page).unwrap());
         catalog.create_table(&mut pager, &schema).unwrap();
         let err = catalog.create_table(&mut pager, &schema).unwrap_err();
-        assert!(matches!(err, DbError::Plan(PlanError::TableAlreadyExists(_))));
+        assert!(matches!(
+            err,
+            DbError::Plan(PlanError::TableAlreadyExists(_))
+        ));
     }
 
     #[test]
@@ -287,7 +351,11 @@ mod tests {
         let mut catalog = Catalog::bootstrap(&mut pager).unwrap();
         let mut schema = sample_schema("users");
         schema.root_page = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(schema.root_page).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(schema.root_page).unwrap());
         catalog.create_table(&mut pager, &schema).unwrap();
 
         catalog.drop_table(&mut pager, "users").unwrap();
@@ -302,7 +370,11 @@ mod tests {
         for name in ["a", "b", "c"] {
             let mut schema = sample_schema(name);
             schema.root_page = pager.allocate_page().unwrap();
-            LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(schema.root_page).unwrap());
+            LeafNode {
+                entries: vec![],
+                next_leaf: 0,
+            }
+            .encode(pager.get_page_mut(schema.root_page).unwrap());
             catalog.create_table(&mut pager, &schema).unwrap();
         }
         let mut names = catalog.list_tables(&mut pager).unwrap();
@@ -316,8 +388,17 @@ mod tests {
         let mut pager = Pager::create(file.path()).unwrap();
         let mut catalog = Catalog::bootstrap(&mut pager).unwrap();
         let idx_root = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(idx_root).unwrap());
-        let idx = IndexSchema { name: "idx_id".into(), table: "users".into(), column: "id".into(), root_page: idx_root };
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(idx_root).unwrap());
+        let idx = IndexSchema {
+            name: "idx_id".into(),
+            table: "users".into(),
+            column: "id".into(),
+            root_page: idx_root,
+        };
         catalog.create_index(&mut pager, &idx).unwrap();
 
         let fetched = catalog.get_index(&mut pager, "idx_id").unwrap().unwrap();
@@ -337,11 +418,17 @@ mod tests {
         let mut catalog = Catalog::bootstrap(&mut pager).unwrap();
         let mut schema = sample_schema("users");
         schema.root_page = pager.allocate_page().unwrap();
-        LeafNode { entries: vec![], next_leaf: 0 }.encode(pager.get_page_mut(schema.root_page).unwrap());
+        LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(pager.get_page_mut(schema.root_page).unwrap());
         catalog.create_table(&mut pager, &schema).unwrap();
 
         let new_root = pager.allocate_page().unwrap();
-        catalog.update_table_root(&mut pager, "users", new_root).unwrap();
+        catalog
+            .update_table_root(&mut pager, "users", new_root)
+            .unwrap();
         let fetched = catalog.get_table(&mut pager, "users").unwrap().unwrap();
         assert_eq!(fetched.root_page, new_root);
     }

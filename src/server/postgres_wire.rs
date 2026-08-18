@@ -11,7 +11,11 @@ use crate::types::value::Value;
 /// Entry point for PostgreSQL sessions when the listener has already consumed the first byte
 /// for protocol detection. `prefix_byte` (always 0x00) is prepended to reconstruct the full
 /// 4-byte startup message length before dispatching to the session body.
-pub async fn handle_postgres_session_with_prefix(mut socket: tokio::net::TcpStream, db: SharedDatabase, prefix_byte: u8) -> io::Result<()> {
+pub async fn handle_postgres_session_with_prefix(
+    mut socket: tokio::net::TcpStream,
+    db: SharedDatabase,
+    prefix_byte: u8,
+) -> io::Result<()> {
     // The listener consumed the first byte of the 4-byte big-endian message length.
     // Read the remaining 3 bytes and reconstruct the full length prefix.
     let mut rest = [0u8; 3];
@@ -20,13 +24,20 @@ pub async fn handle_postgres_session_with_prefix(mut socket: tokio::net::TcpStre
     handle_postgres_session_with_lenbuf(&mut socket, db, len_buf).await
 }
 
-pub async fn handle_postgres_session(mut socket: tokio::net::TcpStream, db: SharedDatabase) -> io::Result<()> {
+pub async fn handle_postgres_session(
+    mut socket: tokio::net::TcpStream,
+    db: SharedDatabase,
+) -> io::Result<()> {
     let mut len_buf = [0u8; 4];
     socket.read_exact(&mut len_buf).await?;
     handle_postgres_session_with_lenbuf(&mut socket, db, len_buf).await
 }
 
-async fn handle_postgres_session_with_lenbuf(socket: &mut tokio::net::TcpStream, db: SharedDatabase, first_len_buf: [u8; 4]) -> io::Result<()> {
+async fn handle_postgres_session_with_lenbuf(
+    socket: &mut tokio::net::TcpStream,
+    db: SharedDatabase,
+    first_len_buf: [u8; 4],
+) -> io::Result<()> {
     let mut len_buf = first_len_buf;
     let mut packet_len = u32::from_be_bytes(len_buf) as usize;
 
@@ -91,7 +102,9 @@ async fn handle_postgres_session_with_lenbuf(socket: &mut tokio::net::TcpStream,
                 } else {
                     // Normalize standard pg driver discovery queries
                     let trimmed_sql = sql.trim_end_matches(';').trim();
-                    if trimmed_sql.eq_ignore_ascii_case("SELECT 1") || trimmed_sql.eq_ignore_ascii_case("SELECT 1 AS one") {
+                    if trimmed_sql.eq_ignore_ascii_case("SELECT 1")
+                        || trimmed_sql.eq_ignore_ascii_case("SELECT 1 AS one")
+                    {
                         write_row_description(socket, &["one".to_string()]).await?;
                         write_data_row(socket, &[Value::Integer(1)]).await?;
                         write_command_complete(socket, "SELECT 1").await?;
@@ -102,7 +115,8 @@ async fn handle_postgres_session_with_lenbuf(socket: &mut tokio::net::TcpStream,
                                 for row in &rows {
                                     write_data_row(socket, row).await?;
                                 }
-                                write_command_complete(socket, &format!("SELECT {}", rows.len())).await?;
+                                write_command_complete(socket, &format!("SELECT {}", rows.len()))
+                                    .await?;
                             }
                             Ok(ExecResult::Modified(count)) => {
                                 let tag = if sql.trim_start().to_uppercase().starts_with("INSERT") {
@@ -117,11 +131,20 @@ async fn handle_postgres_session_with_lenbuf(socket: &mut tokio::net::TcpStream,
                                 write_command_complete(socket, &tag).await?;
                             }
                             Ok(ExecResult::Ok) => {
-                                let tag = if sql.trim_start().to_uppercase().starts_with("CREATE TABLE") {
+                                let tag = if sql
+                                    .trim_start()
+                                    .to_uppercase()
+                                    .starts_with("CREATE TABLE")
+                                {
                                     "CREATE TABLE"
-                                } else if sql.trim_start().to_uppercase().starts_with("DROP TABLE") {
+                                } else if sql.trim_start().to_uppercase().starts_with("DROP TABLE")
+                                {
                                     "DROP TABLE"
-                                } else if sql.trim_start().to_uppercase().starts_with("CREATE INDEX") {
+                                } else if sql
+                                    .trim_start()
+                                    .to_uppercase()
+                                    .starts_with("CREATE INDEX")
+                                {
                                     "CREATE INDEX"
                                 } else if sql.trim_start().to_uppercase().starts_with("BEGIN") {
                                     "BEGIN"

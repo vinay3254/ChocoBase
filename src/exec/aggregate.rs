@@ -144,7 +144,10 @@ impl AggregateOperator {
                 Some(exprs) => {
                     let mut key = Vec::with_capacity(exprs.len());
                     for expr in exprs {
-                        key.push(crate::plan::expr::eval(expr, &self.input_schema, &row).map_err(|e| ExecError::InvalidValue(e.to_string()))?);
+                        key.push(
+                            crate::plan::expr::eval(expr, &self.input_schema, &row)
+                                .map_err(|e| ExecError::InvalidValue(e.to_string()))?,
+                        );
                     }
                     key
                 }
@@ -164,7 +167,8 @@ impl AggregateOperator {
                     | AggregateFunc::Avg(e)
                     | AggregateFunc::Min(e)
                     | AggregateFunc::Max(e) => {
-                        let val = crate::plan::expr::eval(&e, &self.input_schema, &row).map_err(|err| ExecError::InvalidValue(err.to_string()))?;
+                        let val = crate::plan::expr::eval(&e, &self.input_schema, &row)
+                            .map_err(|err| ExecError::InvalidValue(err.to_string()))?;
                         acc.update(Some(&val));
                     }
                 }
@@ -174,7 +178,8 @@ impl AggregateOperator {
         // If no rows were seen and there is no GROUP BY, produce single row with default aggregates (e.g. COUNT(*) = 0)
         if !saw_rows && self.group_by.is_none() {
             let empty_key = Vec::new();
-            let default_accs: Vec<Accumulator> = self.aggregates.iter().map(Accumulator::new).collect();
+            let default_accs: Vec<Accumulator> =
+                self.aggregates.iter().map(Accumulator::new).collect();
             groups.insert(empty_key.clone(), default_accs);
             group_order.push(empty_key);
         }
