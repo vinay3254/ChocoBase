@@ -6,12 +6,12 @@ use dbengine::server::protocol::{read_response, write_request, Request, Response
 use dbengine::types::value::Value;
 use dbengine::{ExecResult, Server, ServerConfig};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_accepts_tcp_connections_and_executes_queries() {
     let file = NamedTempFile::new().unwrap();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let config = ServerConfig::new(addr, file.path());
-    let (_server, bound_addr) = Server::bind(config).await.unwrap();
+    let (_server_handle, bound_addr) = Server::bind(config).await.unwrap();
 
     let mut stream = TcpStream::connect(bound_addr).await.unwrap();
     let mut buf = Vec::new();
@@ -64,12 +64,12 @@ async fn server_accepts_tcp_connections_and_executes_queries() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_handles_multiple_concurrent_tcp_clients() {
     let file = NamedTempFile::new().unwrap();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let config = ServerConfig::new(addr, file.path());
-    let (_server, bound_addr) = Server::bind(config).await.unwrap();
+    let (_server_handle, bound_addr) = Server::bind(config).await.unwrap();
 
     // Initial setup
     {
@@ -129,12 +129,12 @@ async fn server_handles_multiple_concurrent_tcp_clients() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_cleans_up_locks_when_client_disconnects_abruptly() {
     let file = NamedTempFile::new().unwrap();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let config = ServerConfig::new(addr, file.path());
-    let (_server, bound_addr) = Server::bind(config).await.unwrap();
+    let (_server_handle, bound_addr) = Server::bind(config).await.unwrap();
 
     // Client 1: Start transaction, insert row, then disconnect abruptly
     {
@@ -182,4 +182,14 @@ async fn server_cleans_up_locks_when_client_disconnects_abruptly() {
     .unwrap();
     let resp = read_response(&mut stream2, &mut buf2).await.unwrap().unwrap();
     assert_eq!(resp, Response::Result(ExecResult::Modified(1)));
+
+    // Verify row 1 from disconnected Client 1 was rolled back and ONLY row 2 exists
+    write_request(&mut stream2, &Request::Query { sql: "SELECT id FROM t".into() }).await.unwrap();
+    let resp2 = read_response(&mut stream2, &mut buf2).await.unwrap().unwrap();
+    match resp2 {
+        Response::Result(ExecResult::Rows { rows, .. }) => {
+            assert_eq!(rows, vec![vec![Value::Integer(2)]]);
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
 }
