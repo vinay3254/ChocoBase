@@ -10,6 +10,10 @@ pub enum StorageError {
     CorruptPage(u32, String),
     #[error("page {0} out of range")]
     PageOutOfRange(u32),
+    #[error("corrupt journal: {0}")]
+    CorruptJournal(String),
+    #[error("database is locked: {0}")]
+    DatabaseLocked(String),
 }
 
 #[derive(Debug, Error)]
@@ -42,6 +46,10 @@ pub enum PlanError {
     IndexAlreadyExists(String),
     #[error("invalid schema: {0}")]
     InvalidSchema(String),
+    #[error("nested transactions are not supported")]
+    NestedTransactionNotSupported,
+    #[error("cannot commit or rollback: no transaction is in progress")]
+    NoTransactionInProgress,
 }
 
 #[derive(Debug, Error)]
