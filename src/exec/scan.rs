@@ -24,7 +24,7 @@ impl SeqScan {
 impl Operator for SeqScan {
     fn next(&mut self, pager: &mut Pager) -> Result<Option<Vec<Value>>, ExecError> {
         if !self.started {
-            self.cursor = { BTree::new(pager, self.root).cursor_start()? };
+            self.cursor = BTree::new(pager, self.root).cursor_start()?;
             self.started = true;
         }
         match self.cursor.next(pager)? {
@@ -79,7 +79,7 @@ impl IndexSeek {
 impl Operator for IndexSeek {
     fn next(&mut self, pager: &mut Pager) -> Result<Option<Vec<Value>>, ExecError> {
         if !self.started {
-            self.cursor = { BTree::new(pager, self.index_root).cursor_seek(&self.prefix)? };
+            self.cursor = BTree::new(pager, self.index_root).cursor_seek(&self.prefix)?;
             self.started = true;
         }
         loop {
