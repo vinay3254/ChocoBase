@@ -611,6 +611,15 @@ impl Database {
             Statement::AlterTableRls { table, enabled } => {
                 self.execute_alter_table_rls(&table, enabled)
             }
+            Statement::AlterTableAddColumn { table, column } => {
+                self.execute_alter_table_add_column(&table, column)
+            }
+            Statement::AlterTableDropColumn { table, column } => {
+                self.execute_alter_table_drop_column(&table, &column)
+            }
+            Statement::AlterTableRename { table, new_name } => {
+                self.execute_alter_table_rename(&table, &new_name)
+            }
             Statement::CreatePolicy {
                 name,
                 table,
@@ -684,6 +693,215 @@ impl Database {
     fn execute_alter_table_rls(&mut self, table: &str, enabled: bool) -> Result<ExecResult> {
         self.catalog
             .set_table_rls(&mut self.pager, table, enabled)?;
+        Ok(ExecResult::Ok)
+    }
+
+    fn execute_alter_table_add_column(
+        &mut self,
+        table_name: &str,
+        col_def: crate::sql::ast::ColumnDef,
+    ) -> Result<ExecResult> {
+        let mut schema = self
+            .catalog
+            .get_table(&mut self.pager, table_name)?
+            .ok_or_else(|| PlanError::NoSuchTable(table_name.to_string()))?;
+
+        if schema.columns.iter().any(|c| c.name == col_def.name) {
+            return Err(DbError::Plan(PlanError::NoSuchColumn(format!(
+                "column '{}' already exists in table '{}'",
+                col_def.name, table_name
+            ))));
+        }
+
+        let new_col = crate::types::schema::Column {
+            name: col_def.name,
+            ty: col_def.ty,
+            not_null: col_def.not_null,
+            is_primary_key: col_def.primary_key,
+        };
+
+        // Scan all existing rows, append Value::Null, and re-write
+        let indexes = self
+            .catalog
+            .list_indexes_for_table(&mut self.pager, table_name)?;
+        let all_cols: Vec<usize> = (0..schema.columns.len()).collect();
+        let mut plan = crate::plan::planner::build_select_plan_with_context(
+            &schema,
+            &indexes,
+            None,
+            all_cols,
+            None,
+            None,
+            &crate::auth::ExecutionContext::admin(),
+        )?;
+
+        let mut existing_rows = Vec::new();
+        while let Some(mut row) = plan.next(&mut self.pager)? {
+            row.push(Value::Null);
+            existing_rows.push(row);
+        }
+
+        // Allocate new root leaf page for migrated table
+        let new_root = self.pager.allocate_page()?;
+        crate::btree::node::LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(self.pager.get_page_mut(new_root)?);
+
+        schema.columns.push(new_col);
+        schema.root_page = new_root;
+
+        let mut table_root = new_root;
+        let mut index_roots: HashMap<String, u32> = indexes
+            .iter()
+            .map(|i| (i.name.clone(), i.root_page))
+            .collect();
+
+        for row in existing_rows {
+            let mut schema_for_write = schema.clone();
+            schema_for_write.root_page = table_root;
+            let indexes_for_write: Vec<IndexSchema> = indexes
+                .iter()
+                .cloned()
+                .map(|mut idx| {
+                    idx.root_page = index_roots[&idx.name];
+                    idx
+                })
+                .collect();
+
+            let (next_table_root, next_index_roots) = crate::exec::mutate::insert_row(
+                &mut self.pager,
+                &schema_for_write,
+                &indexes_for_write,
+                &row,
+            )?;
+            table_root = next_table_root;
+            for (name, root) in next_index_roots {
+                index_roots.insert(name, root);
+            }
+        }
+
+        schema.root_page = table_root;
+        self.catalog.update_table_schema(&mut self.pager, &schema)?;
+        for idx in &indexes {
+            let new_idx_root = index_roots[&idx.name];
+            if new_idx_root != idx.root_page {
+                self.catalog
+                    .update_index_root(&mut self.pager, &idx.name, new_idx_root)?;
+            }
+        }
+
+        Ok(ExecResult::Ok)
+    }
+
+    fn execute_alter_table_drop_column(
+        &mut self,
+        table_name: &str,
+        col_name: &str,
+    ) -> Result<ExecResult> {
+        let mut schema = self
+            .catalog
+            .get_table(&mut self.pager, table_name)?
+            .ok_or_else(|| PlanError::NoSuchTable(table_name.to_string()))?;
+
+        let col_idx = schema
+            .column_index(col_name)
+            .ok_or_else(|| PlanError::NoSuchColumn(col_name.to_string()))?;
+
+        if schema.columns[col_idx].is_primary_key {
+            return Err(DbError::Plan(PlanError::CannotUpdatePrimaryKey));
+        }
+
+        // Drop any indexes on this column
+        let indexes = self
+            .catalog
+            .list_indexes_for_table(&mut self.pager, table_name)?;
+        for idx in &indexes {
+            if idx.column == col_name {
+                self.catalog.drop_index(&mut self.pager, &idx.name)?;
+            }
+        }
+
+        let remaining_indexes = self
+            .catalog
+            .list_indexes_for_table(&mut self.pager, table_name)?;
+
+        // Scan all existing rows, remove column at col_idx, and re-write
+        let all_cols: Vec<usize> = (0..schema.columns.len()).collect();
+        let mut plan = crate::plan::planner::build_select_plan_with_context(
+            &schema,
+            &indexes,
+            None,
+            all_cols,
+            None,
+            None,
+            &crate::auth::ExecutionContext::admin(),
+        )?;
+
+        let mut existing_rows = Vec::new();
+        while let Some(mut row) = plan.next(&mut self.pager)? {
+            row.remove(col_idx);
+            existing_rows.push(row);
+        }
+
+        // Allocate new root leaf page for table
+        let new_root = self.pager.allocate_page()?;
+        crate::btree::node::LeafNode {
+            entries: vec![],
+            next_leaf: 0,
+        }
+        .encode(self.pager.get_page_mut(new_root)?);
+
+        schema.columns.remove(col_idx);
+        schema.root_page = new_root;
+
+        let mut table_root = new_root;
+        let mut index_roots: HashMap<String, u32> = remaining_indexes
+            .iter()
+            .map(|i| (i.name.clone(), i.root_page))
+            .collect();
+
+        for row in existing_rows {
+            let mut schema_for_write = schema.clone();
+            schema_for_write.root_page = table_root;
+            let indexes_for_write: Vec<IndexSchema> = remaining_indexes
+                .iter()
+                .cloned()
+                .map(|mut idx| {
+                    idx.root_page = index_roots[&idx.name];
+                    idx
+                })
+                .collect();
+
+            let (next_table_root, next_index_roots) = crate::exec::mutate::insert_row(
+                &mut self.pager,
+                &schema_for_write,
+                &indexes_for_write,
+                &row,
+            )?;
+            table_root = next_table_root;
+            for (name, root) in next_index_roots {
+                index_roots.insert(name, root);
+            }
+        }
+
+        schema.root_page = table_root;
+        self.catalog.update_table_schema(&mut self.pager, &schema)?;
+        for idx in &remaining_indexes {
+            let new_idx_root = index_roots[&idx.name];
+            if new_idx_root != idx.root_page {
+                self.catalog
+                    .update_index_root(&mut self.pager, &idx.name, new_idx_root)?;
+            }
+        }
+
+        Ok(ExecResult::Ok)
+    }
+
+    fn execute_alter_table_rename(&mut self, old_name: &str, new_name: &str) -> Result<ExecResult> {
+        self.catalog
+            .rename_table(&mut self.pager, old_name, new_name)?;
         Ok(ExecResult::Ok)
     }
 
