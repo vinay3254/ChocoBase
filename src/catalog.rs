@@ -81,6 +81,45 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn update_table_schema(
+        &mut self,
+        pager: &mut Pager,
+        schema: &TableSchema,
+    ) -> Result<(), DbError> {
+        let key = Self::table_key(&schema.name);
+        let mut bt = BTree::new(pager, self.root);
+        let _ = bt.delete(&key);
+        bt.insert(&key, &encode_table_record(schema))?;
+        self.root = bt.root();
+        pager.set_catalog_root(self.root)?;
+        Ok(())
+    }
+
+    pub fn rename_table(
+        &mut self,
+        pager: &mut Pager,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<(), DbError> {
+        if self.get_table(pager, new_name)?.is_some() {
+            return Err(DbError::Plan(PlanError::TableAlreadyExists(
+                new_name.to_string(),
+            )));
+        }
+        let mut schema = self
+            .get_table(pager, old_name)?
+            .ok_or_else(|| PlanError::NoSuchTable(old_name.to_string()))?;
+        schema.name = new_name.to_string();
+        let old_key = Self::table_key(old_name);
+        let new_key = Self::table_key(new_name);
+        let mut bt = BTree::new(pager, self.root);
+        bt.delete(&old_key)?;
+        bt.insert(&new_key, &encode_table_record(&schema))?;
+        self.root = bt.root();
+        pager.set_catalog_root(self.root)?;
+        Ok(())
+    }
+
     pub fn drop_table(&mut self, pager: &mut Pager, name: &str) -> Result<(), DbError> {
         let schema = self
             .get_table(pager, name)?
