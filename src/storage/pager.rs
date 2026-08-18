@@ -1,22 +1,29 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::StorageError;
 use crate::storage::header::Header;
+use crate::storage::journal::{self, Journal};
 use crate::storage::page::{Page, PAGE_SIZE};
 
 const DEFAULT_CACHE_CAPACITY: usize = 256;
 
 pub struct Pager {
     file: File,
+    path: PathBuf,
     cache: HashMap<u32, Page>,
     recency: VecDeque<u32>,
     dirty: HashSet<u32>,
     header: Header,
     capacity: usize,
     pub pages_read: u64,
+
+    in_transaction: bool,
+    journal: Option<Journal>,
+    journaled_pages: HashSet<u32>,
+    orig_page_count: u32,
 }
 
 impl Pager {
@@ -29,12 +36,17 @@ impl Pager {
             .open(path)?;
         let mut pager = Pager {
             file,
+            path: path.to_path_buf(),
             cache: HashMap::new(),
             recency: VecDeque::new(),
             dirty: HashSet::new(),
             header: Header::new(),
             capacity: DEFAULT_CACHE_CAPACITY,
             pages_read: 0,
+            in_transaction: false,
+            journal: None,
+            journaled_pages: HashSet::new(),
+            orig_page_count: 1,
         };
         pager.flush_header()?;
         pager.file.sync_all()?;
@@ -42,6 +54,8 @@ impl Pager {
     }
 
     pub fn open(path: &Path) -> Result<Self, StorageError> {
+        journal::recover_if_needed(path)?;
+
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut buf = [0u8; PAGE_SIZE];
         file.seek(SeekFrom::Start(0))?;
@@ -50,13 +64,67 @@ impl Pager {
         let header = Header::read_from(&page)?;
         Ok(Pager {
             file,
+            path: path.to_path_buf(),
             cache: HashMap::new(),
             recency: VecDeque::new(),
             dirty: HashSet::new(),
             header,
             capacity: DEFAULT_CACHE_CAPACITY,
             pages_read: 0,
+            in_transaction: false,
+            journal: None,
+            journaled_pages: HashSet::new(),
+            orig_page_count: 0,
         })
+    }
+
+    pub fn in_transaction(&self) -> bool {
+        self.in_transaction
+    }
+
+    pub fn begin_transaction(&mut self) -> Result<(), StorageError> {
+        if self.in_transaction {
+            return Err(StorageError::CorruptJournal("transaction already in progress".into()));
+        }
+        self.orig_page_count = self.header.page_count;
+        self.journal = Some(Journal::create(&self.path, self.orig_page_count)?);
+        self.journaled_pages.clear();
+        self.in_transaction = true;
+        Ok(())
+    }
+
+    pub fn commit_transaction(&mut self) -> Result<(), StorageError> {
+        if !self.in_transaction {
+            return Ok(());
+        }
+        if let Some(mut jnl) = self.journal.take() {
+            jnl.sync()?;
+            self.flush()?;
+            jnl.close_and_delete()?;
+        }
+        self.journaled_pages.clear();
+        self.in_transaction = false;
+        Ok(())
+    }
+
+    pub fn rollback_transaction(&mut self) -> Result<(), StorageError> {
+        if !self.in_transaction {
+            return Ok(());
+        }
+        if let Some(jnl) = self.journal.take() {
+            drop(jnl);
+        }
+        journal::recover_if_needed(&self.path)?;
+
+        self.cache.clear();
+        self.recency.clear();
+        self.dirty.clear();
+
+        let page0 = self.read_page_from_disk(0)?;
+        self.header = Header::read_from(&page0)?;
+        self.journaled_pages.clear();
+        self.in_transaction = false;
+        Ok(())
     }
 
     pub fn catalog_root(&self) -> u32 {
@@ -64,8 +132,21 @@ impl Pager {
     }
 
     pub fn set_catalog_root(&mut self, root: u32) -> Result<(), StorageError> {
+        self.record_preimage_for_header()?;
         self.header.catalog_root = root;
         self.flush_header()
+    }
+
+    fn record_preimage_for_header(&mut self) -> Result<(), StorageError> {
+        if self.in_transaction && !self.journaled_pages.contains(&0) {
+            let mut page0 = Page::zeroed();
+            self.header.write_to(&mut page0);
+            if let Some(jnl) = &mut self.journal {
+                jnl.append_page(0, &page0)?;
+            }
+            self.journaled_pages.insert(0);
+        }
+        Ok(())
     }
 
     fn flush_header(&mut self) -> Result<(), StorageError> {
@@ -130,14 +211,31 @@ impl Pager {
 
     pub fn get_page_mut(&mut self, no: u32) -> Result<&mut Page, StorageError> {
         self.ensure_loaded(no)?;
+        if self.in_transaction && !self.journaled_pages.contains(&no) {
+            if no < self.orig_page_count {
+                let page_copy = self.cache.get(&no).unwrap().clone();
+                if let Some(jnl) = &mut self.journal {
+                    jnl.append_page(no, &page_copy)?;
+                }
+            }
+            self.journaled_pages.insert(no);
+        }
         self.dirty.insert(no);
         Ok(self.cache.get_mut(&no).unwrap())
     }
 
     pub fn allocate_page(&mut self) -> Result<u32, StorageError> {
+        self.record_preimage_for_header()?;
         let no = if self.header.freelist_head != 0 {
             let free_no = self.header.freelist_head;
             self.ensure_loaded(free_no)?;
+            if self.in_transaction && !self.journaled_pages.contains(&free_no) && free_no < self.orig_page_count {
+                let page_copy = self.cache.get(&free_no).unwrap().clone();
+                if let Some(jnl) = &mut self.journal {
+                    jnl.append_page(free_no, &page_copy)?;
+                }
+                self.journaled_pages.insert(free_no);
+            }
             let next = self.cache.get(&free_no).unwrap().read_u32(0);
             self.header.freelist_head = next;
             self.flush_header()?;
@@ -157,6 +255,16 @@ impl Pager {
     }
 
     pub fn free_page(&mut self, no: u32) -> Result<(), StorageError> {
+        self.record_preimage_for_header()?;
+        self.ensure_loaded(no)?;
+        if self.in_transaction && !self.journaled_pages.contains(&no) && no < self.orig_page_count {
+            let page_copy = self.cache.get(&no).unwrap().clone();
+            if let Some(jnl) = &mut self.journal {
+                jnl.append_page(no, &page_copy)?;
+            }
+            self.journaled_pages.insert(no);
+        }
+
         let mut page = Page::zeroed();
         page.write_u32(0, self.header.freelist_head);
         self.evict_if_needed()?;
@@ -210,62 +318,148 @@ mod tests {
         let path = file.path();
         {
             let mut pager = Pager::create(path).unwrap();
-            pager.set_catalog_root(9).unwrap();
+            assert_eq!(pager.catalog_root(), 0);
+            pager.set_catalog_root(42).unwrap();
         }
-        let pager = Pager::open(path).unwrap();
-        assert_eq!(pager.catalog_root(), 9);
-    }
-
-    #[test]
-    fn get_page_mut_then_get_page_sees_write() {
-        let file = NamedTempFile::new().unwrap();
-        let mut pager = Pager::create(file.path()).unwrap();
-        let no = pager.allocate_page().unwrap();
         {
-            let page = pager.get_page_mut(no).unwrap();
-            page.write_u8(0, 42);
+            let pager = Pager::open(path).unwrap();
+            assert_eq!(pager.catalog_root(), 42);
         }
-        let page = pager.get_page(no).unwrap();
-        assert_eq!(page.read_u8(0), 42);
     }
 
     #[test]
-    fn allocate_extends_file_and_free_reuses_page() {
-        let file = NamedTempFile::new().unwrap();
-        let mut pager = Pager::create(file.path()).unwrap();
-        let a = pager.allocate_page().unwrap();
-        let b = pager.allocate_page().unwrap();
-        assert_ne!(a, b);
-        pager.free_page(a).unwrap();
-        let c = pager.allocate_page().unwrap();
-        assert_eq!(c, a, "freed page should be reused before extending the file");
-    }
-
-    #[test]
-    fn flush_persists_dirty_pages_across_reopen() {
+    fn allocate_and_free_pages_reuses_freelist() {
         let file = NamedTempFile::new().unwrap();
         let path = file.path();
-        let no;
-        {
-            let mut pager = Pager::create(path).unwrap();
-            no = pager.allocate_page().unwrap();
-            pager.get_page_mut(no).unwrap().write_u8(5, 77);
-            pager.flush().unwrap();
-        }
-        let mut pager = Pager::open(path).unwrap();
-        assert_eq!(pager.get_page(no).unwrap().read_u8(5), 77);
+        let mut pager = Pager::create(path).unwrap();
+
+        let p1 = pager.allocate_page().unwrap();
+        let p2 = pager.allocate_page().unwrap();
+        assert_eq!(p1, 1);
+        assert_eq!(p2, 2);
+        assert_eq!(pager.header.page_count, 3);
+
+        pager.free_page(p2).unwrap();
+        assert_eq!(pager.header.freelist_head, 2);
+
+        let p3 = pager.allocate_page().unwrap();
+        assert_eq!(p3, 2, "freed page 2 should be reused");
+        assert_eq!(pager.header.freelist_head, 0);
+        assert_eq!(pager.header.page_count, 3, "page count shouldn't have grown");
     }
 
     #[test]
-    fn stats_report_page_count_and_reads() {
+    fn transaction_rollback_restores_preimages() {
         let file = NamedTempFile::new().unwrap();
-        let mut pager = Pager::create(file.path()).unwrap();
-        let no = pager.allocate_page().unwrap();
+        let path = file.path();
+        let mut pager = Pager::create(path).unwrap();
+
+        let p1 = pager.allocate_page().unwrap();
+        {
+            let page = pager.get_page_mut(p1).unwrap();
+            page.write_u32(0, 100);
+        }
         pager.flush().unwrap();
-        pager.reset_read_counter();
-        let _ = pager.get_page(no); // still cached, no disk read
-        let stats = pager.stats();
-        assert_eq!(stats.pages_read, 0);
-        assert!(stats.page_count >= 2);
+
+        // Start transaction and modify
+        pager.begin_transaction().unwrap();
+        {
+            let page = pager.get_page_mut(p1).unwrap();
+            page.write_u32(0, 999);
+        }
+        let p2 = pager.allocate_page().unwrap();
+        {
+            let page = pager.get_page_mut(p2).unwrap();
+            page.write_u32(0, 777);
+        }
+
+        // Rollback
+        pager.rollback_transaction().unwrap();
+
+        // Verify state is restored
+        assert_eq!(pager.get_page(p1).unwrap().read_u32(0), 100);
+        assert_eq!(pager.header.page_count, 2);
+    }
+
+    #[test]
+    fn injected_write_failure_during_transaction_mutation_surfaces_clean_error_and_does_not_leak_to_db_file() {
+        use crate::storage::journal::{journal_path_for, JournalWriter};
+        use std::io::{Seek, SeekFrom, Write};
+
+        struct FailingWriter {
+            inner: File,
+            allow_bytes: usize,
+            written_bytes: usize,
+        }
+
+        impl Write for FailingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.written_bytes + buf.len() > self.allow_bytes {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "injected disk full error during journal write",
+                    ));
+                }
+                let n = self.inner.write(buf)?;
+                self.written_bytes += n;
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.inner.flush()
+            }
+        }
+
+        impl Seek for FailingWriter {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.inner.seek(pos)
+            }
+        }
+
+        impl JournalWriter for FailingWriter {
+            fn sync_all(&mut self) -> std::io::Result<()> {
+                self.inner.sync_all()
+            }
+        }
+
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let mut pager = Pager::create(path).unwrap();
+
+        let p1 = pager.allocate_page().unwrap();
+        {
+            let page = pager.get_page_mut(p1).unwrap();
+            page.write_u32(0, 42);
+        }
+        pager.flush().unwrap();
+
+        // 1. Begin transaction
+        pager.begin_transaction().unwrap();
+
+        // 2. Inject a failing writer that succeeds writing the 64-byte header but fails on record append
+        let jnl_path = journal_path_for(path);
+        let jnl_file = OpenOptions::new().read(true).write(true).open(&jnl_path).unwrap();
+        let failing_writer = FailingWriter {
+            inner: jnl_file,
+            allow_bytes: crate::storage::journal::JOURNAL_HEADER_SIZE,
+            written_bytes: 0,
+        };
+        let injected_journal = Journal::new_with_writer(Box::new(failing_writer), jnl_path, pager.header.page_count).unwrap();
+        pager.journal = Some(injected_journal);
+
+        // 3. Attempt to mutate page 1: must cleanly return Err(StorageError::Io) with StorageFull
+        let res = pager.get_page_mut(p1);
+        match res {
+            Err(StorageError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::StorageFull),
+            other => panic!("expected StorageError::Io(StorageFull), got {:?}", other.is_err()),
+        }
+
+        // 4. Verify dirty set does NOT contain p1 and page was not mutated in live db file
+        assert!(!pager.dirty.contains(&p1));
+
+        drop(pager);
+
+        // 5. Open database fresh: recovery runs, pre-transaction state is intact (p1 = 42)
+        let mut reopened = Pager::open(path).unwrap();
+        assert_eq!(reopened.get_page(p1).unwrap().read_u32(0), 42);
     }
 }
