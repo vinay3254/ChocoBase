@@ -274,15 +274,25 @@ pub fn verify_jwt(token: &str, fallback_secret: &[u8]) -> Result<SessionClaims> 
     let expected_sig_bytes = compute_hmac_signature(to_sign.as_bytes(), secret);
     let expected_sig = base64_url_encode(&expected_sig_bytes);
 
-    if expected_sig
+    let is_valid = expected_sig
         .as_bytes()
         .ct_eq(parts[2].as_bytes())
         .unwrap_u8()
-        != 1
-    {
-        return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
-            "invalid JWT signature".into(),
-        )));
+        == 1;
+
+    if !is_valid {
+        let fallback_sig_bytes = compute_hmac_signature(to_sign.as_bytes(), fallback_secret);
+        let fallback_sig = base64_url_encode(&fallback_sig_bytes);
+        if fallback_sig
+            .as_bytes()
+            .ct_eq(parts[2].as_bytes())
+            .unwrap_u8()
+            != 1
+        {
+            return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+                "invalid JWT signature".into(),
+            )));
+        }
     }
 
     // 4. Decode claims
