@@ -334,8 +334,12 @@ async fn write_data_row(writer: &mut TcpStream, row: &[Value]) -> io::Result<()>
             _ => {
                 let s = match val {
                     Value::Integer(i) => i.to_string(),
+                    Value::Float(f) => f.to_string(),
                     Value::Text(t) | Value::Json(t) => t.clone(),
                     Value::Boolean(b) => b.to_string(),
+                    Value::Vector(v) => {
+                        serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string())
+                    }
                     Value::Null => String::new(),
                 };
                 let bytes = s.as_bytes();
