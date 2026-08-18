@@ -10,6 +10,12 @@ pub struct Header {
     pub catalog_root: u32,
 }
 
+impl Default for Header {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Header {
     pub fn new() -> Self {
         Header {
