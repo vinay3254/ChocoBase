@@ -46,14 +46,35 @@ impl Parser {
         let offset = self.peek_offset();
         match self.advance() {
             Token::Identifier(s) => Ok(s),
+            Token::Role => Ok("role".into()),
+            Token::User => Ok("user".into()),
+            Token::Password => Ok("password".into()),
+            Token::Policy => Ok("policy".into()),
+            Token::Enable => Ok("enable".into()),
+            Token::Disable => Ok("disable".into()),
+            Token::Count => Ok("count".into()),
+            Token::Sum => Ok("sum".into()),
+            Token::Avg => Ok("avg".into()),
+            Token::Min => Ok("min".into()),
+            Token::Max => Ok("max".into()),
+            Token::KwInteger => Ok("integer".into()),
+            Token::KwText => Ok("text".into()),
+            Token::KwBoolean => Ok("boolean".into()),
+            Token::KwJson => Ok("json".into()),
             other => Err(ParseError::Syntax { offset, message: format!("expected identifier, found {other:?}") }),
         }
     }
 
     pub fn parse_statement(&mut self) -> Result<Statement, ParseError> {
         let stmt = match self.peek() {
+            Token::Explain => {
+                self.advance();
+                let inner = self.parse_statement()?;
+                Statement::Explain(Box::new(inner))
+            }
             Token::Create => self.parse_create()?,
             Token::Drop => self.parse_drop()?,
+            Token::Alter => self.parse_alter()?,
             Token::Insert => self.parse_insert()?,
             Token::Select => self.parse_select()?,
             Token::Update => self.parse_update()?,
@@ -92,8 +113,84 @@ impl Parser {
         match self.peek() {
             Token::Table => self.parse_create_table(),
             Token::Index => self.parse_create_index(),
-            _ => Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected TABLE or INDEX after CREATE".into() }),
+            Token::User => self.parse_create_user(),
+            Token::Policy => self.parse_create_policy(),
+            _ => Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected TABLE, INDEX, USER, or POLICY after CREATE".into() }),
         }
+    }
+
+    fn parse_create_user(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::User)?;
+        let username = self.expect_identifier()?;
+        if matches!(self.peek(), Token::With) {
+            self.advance();
+        }
+        self.expect(&Token::Password)?;
+        let pwd_offset = self.peek_offset();
+        let password = match self.advance() {
+            Token::StringLiteral(s) => s,
+            other => return Err(ParseError::Syntax { offset: pwd_offset, message: format!("expected password string literal, found {other:?}") }),
+        };
+        let mut role = None;
+        if matches!(self.peek(), Token::Role) {
+            self.advance();
+            let role_offset = self.peek_offset();
+            role = match self.advance() {
+                Token::StringLiteral(s) => Some(s),
+                Token::Identifier(s) => Some(s),
+                other => return Err(ParseError::Syntax { offset: role_offset, message: format!("expected role string or identifier, found {other:?}") }),
+            };
+        }
+        Ok(Statement::CreateUser { username, password, role })
+    }
+
+    fn parse_create_policy(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Policy)?;
+        let name = self.expect_identifier()?;
+        self.expect(&Token::On)?;
+        let table = self.expect_identifier()?;
+        self.expect(&Token::For)?;
+        let cmd = match self.peek() {
+            Token::Select => { self.advance(); crate::types::schema::PolicyCmd::Select }
+            Token::Insert => { self.advance(); crate::types::schema::PolicyCmd::Insert }
+            Token::Update => { self.advance(); crate::types::schema::PolicyCmd::Update }
+            Token::Delete => { self.advance(); crate::types::schema::PolicyCmd::Delete }
+            Token::All => { self.advance(); crate::types::schema::PolicyCmd::All }
+            other => return Err(ParseError::Syntax { offset: self.peek_offset(), message: format!("expected SELECT, INSERT, UPDATE, DELETE, or ALL after FOR, found {other:?}") }),
+        };
+        let mut using_expr = None;
+        if matches!(self.peek(), Token::Using) {
+            self.advance();
+            self.expect(&Token::LParen)?;
+            using_expr = Some(self.parse_where_expr()?);
+            self.expect(&Token::RParen)?;
+        }
+        let mut with_check = None;
+        if matches!(self.peek(), Token::With) || matches!(self.peek(), Token::Check) {
+            if matches!(self.peek(), Token::With) {
+                self.advance();
+            }
+            self.expect(&Token::Check)?;
+            self.expect(&Token::LParen)?;
+            with_check = Some(self.parse_where_expr()?);
+            self.expect(&Token::RParen)?;
+        }
+        Ok(Statement::CreatePolicy { name, table, cmd, using_expr, with_check })
+    }
+
+    fn parse_alter(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Alter)?;
+        self.expect(&Token::Table)?;
+        let table = self.expect_identifier()?;
+        let enabled = match self.advance() {
+            Token::Enable => true,
+            Token::Disable => false,
+            other => return Err(ParseError::Syntax { offset: self.peek_offset(), message: format!("expected ENABLE or DISABLE, found {other:?}") }),
+        };
+        self.expect(&Token::Row)?;
+        self.expect(&Token::Level)?;
+        self.expect(&Token::Security)?;
+        Ok(Statement::AlterTableRls { table, enabled })
     }
 
     fn parse_create_table(&mut self) -> Result<Statement, ParseError> {
@@ -141,7 +238,13 @@ impl Parser {
         match self.advance() {
             Token::Table => Ok(Statement::DropTable { name: self.expect_identifier()? }),
             Token::Index => Ok(Statement::DropIndex { name: self.expect_identifier()? }),
-            other => Err(ParseError::Syntax { offset, message: format!("expected TABLE or INDEX, found {other:?}") }),
+            Token::Policy => {
+                let name = self.expect_identifier()?;
+                self.expect(&Token::On)?;
+                let table = self.expect_identifier()?;
+                Ok(Statement::DropPolicy { name, table })
+            }
+            other => Err(ParseError::Syntax { offset, message: format!("expected TABLE, INDEX, or POLICY after DROP, found {other:?}") }),
         }
     }
 
@@ -201,8 +304,27 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Expr::JsonExtract { expr: Box::new(inner), path, as_text: true }
             }
+            Token::AuthUid => {
+                if matches!(self.peek(), Token::LParen) {
+                    self.advance();
+                    self.expect(&Token::RParen)?;
+                }
+                Expr::AuthUid
+            }
             Token::Identifier(name) => {
-                if matches!(self.peek(), Token::Dot) {
+                if name.eq_ignore_ascii_case("auth") && matches!(self.peek(), Token::Dot) {
+                    self.advance();
+                    let fn_name = self.expect_identifier()?;
+                    if fn_name.eq_ignore_ascii_case("uid") {
+                        if matches!(self.peek(), Token::LParen) {
+                            self.advance();
+                            self.expect(&Token::RParen)?;
+                        }
+                        Expr::AuthUid
+                    } else {
+                        Expr::QualifiedColumn { table: name, column: fn_name }
+                    }
+                } else if matches!(self.peek(), Token::Dot) {
                     self.advance();
                     let col = self.expect_identifier()?;
                     Expr::QualifiedColumn { table: name, column: col }
@@ -210,6 +332,9 @@ impl Parser {
                     Expr::Column(name)
                 }
             }
+            Token::Role => Expr::Column("role".into()),
+            Token::User => Expr::Column("user".into()),
+            Token::Password => Expr::Column("password".into()),
             Token::LParen => {
                 let e = self.parse_where_expr()?;
                 self.expect(&Token::RParen)?;
@@ -327,6 +452,60 @@ impl Parser {
                 };
                 self.expect(&Token::Null)?;
                 Ok(Expr::IsNull { expr: Box::new(left), negated })
+            }
+            Token::In => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let mut list = Vec::new();
+                loop {
+                    list.push(self.parse_where_expr()?);
+                    match self.peek() {
+                        Token::Comma => { self.advance(); }
+                        Token::RParen => break,
+                        _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')' in IN list".into() }),
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                Ok(Expr::InList { expr: Box::new(left), list, negated: false })
+            }
+            Token::Like => {
+                self.advance();
+                let path_offset = self.peek_offset();
+                let pattern = match self.advance() {
+                    Token::StringLiteral(s) => s,
+                    other => return Err(ParseError::Syntax { offset: path_offset, message: format!("expected pattern string after LIKE, found {other:?}") }),
+                };
+                Ok(Expr::Like { expr: Box::new(left), pattern, negated: false })
+            }
+            Token::Not => {
+                self.advance();
+                match self.peek() {
+                    Token::In => {
+                        self.advance();
+                        self.expect(&Token::LParen)?;
+                        let mut list = Vec::new();
+                        loop {
+                            list.push(self.parse_where_expr()?);
+                            match self.peek() {
+                                Token::Comma => { self.advance(); }
+                                Token::RParen => break,
+                                _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected ',' or ')' in IN list".into() }),
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                        Ok(Expr::InList { expr: Box::new(left), list, negated: true })
+                    }
+                    Token::Like => {
+                        self.advance();
+                        let path_offset = self.peek_offset();
+                        let pattern = match self.advance() {
+                            Token::StringLiteral(s) => s,
+                            other => return Err(ParseError::Syntax { offset: path_offset, message: format!("expected pattern string after LIKE, found {other:?}") }),
+                        };
+                        Ok(Expr::Like { expr: Box::new(left), pattern, negated: true })
+                    }
+                    other => Err(ParseError::Syntax { offset: self.peek_offset(), message: format!("expected IN or LIKE after NOT, found {other:?}") }),
+                }
             }
             _ => Ok(left),
         }
@@ -606,6 +785,7 @@ mod tests {
         let stmt = parse("SELECT id FROM t WHERE name IS NOT NULL").unwrap();
         match stmt {
             Statement::Select { columns, table, where_clause, order_by, limit, .. } => {
+                assert_eq!(columns, SelectColumns::Items(vec![SelectItem::Expr { expr: Expr::Column("id".into()), alias: None }]));
                 assert_eq!(table, "t");
                 assert_eq!(where_clause, Some(Expr::IsNull { expr: Box::new(Expr::Column("name".into())), negated: true }));
                 assert_eq!(order_by, None);

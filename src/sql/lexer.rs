@@ -52,6 +52,15 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
             '-' => {
                 chars.next();
                 match chars.peek() {
+                    Some(&(_, '-')) => {
+                        // Single-line comment: skip until newline or EOF
+                        chars.next();
+                        for (_, ch) in chars.by_ref() {
+                            if ch == '\n' {
+                                break;
+                            }
+                        }
+                    }
                     Some(&(_, '>')) => {
                         chars.next();
                         if let Some(&(_, '>')) = chars.peek() {
@@ -61,7 +70,47 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                             tokens.push(SpannedToken { token: Token::Arrow, offset: start });
                         }
                     }
+                    Some(&(_, c2)) if c2.is_ascii_digit() => {
+                        let mut num_str = String::from("-");
+                        while let Some(&(_, d)) = chars.peek() {
+                            if d.is_ascii_digit() {
+                                num_str.push(d);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        let n: i64 = num_str.parse().map_err(|_| ParseError::Syntax {
+                            offset: start,
+                            message: "integer literal overflow".into(),
+                        })?;
+                        tokens.push(SpannedToken { token: Token::IntLiteral(n), offset: start });
+                    }
                     _ => return Err(ParseError::Syntax { offset: start, message: "unexpected '-'".into() }),
+                }
+            }
+            '/' => {
+                chars.next();
+                if let Some(&(_, '*')) = chars.peek() {
+                    chars.next();
+                    let mut closed = false;
+                    while let Some((_, ch)) = chars.next() {
+                        if ch == '*' {
+                            if let Some(&(_, '/')) = chars.peek() {
+                                chars.next();
+                                closed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !closed {
+                        return Err(ParseError::Syntax {
+                            offset: start,
+                            message: "unterminated block comment".into(),
+                        });
+                    }
+                } else {
+                    return Err(ParseError::Syntax { offset: start, message: "unexpected '/'".into() });
                 }
             }
             '!' => {
@@ -186,6 +235,25 @@ fn keyword_or_identifier(text: &str) -> Token {
         "BOOLEAN" => Token::KwBoolean,
         "JSON" => Token::KwJson,
         "JSON_EXTRACT" => Token::JsonExtract,
+        "USER" => Token::User,
+        "PASSWORD" => Token::Password,
+        "POLICY" => Token::Policy,
+        "ENABLE" => Token::Enable,
+        "DISABLE" => Token::Disable,
+        "ROW" => Token::Row,
+        "LEVEL" => Token::Level,
+        "SECURITY" => Token::Security,
+        "USING" => Token::Using,
+        "CHECK" => Token::Check,
+        "ROLE" => Token::Role,
+        "AUTH_UID" => Token::AuthUid,
+        "ALTER" => Token::Alter,
+        "FOR" => Token::For,
+        "WITH" => Token::With,
+        "ALL" => Token::All,
+        "EXPLAIN" => Token::Explain,
+        "IN" => Token::In,
+        "LIKE" => Token::Like,
         "TRUE" => Token::True,
         "FALSE" => Token::False,
         _ => Token::Identifier(text.to_string()),

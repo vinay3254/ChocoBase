@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use crate::types::value::ColumnType;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +23,18 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    // Auth & RLS DDL
+    CreateUser { username: String, password: String, role: Option<String> },
+    AlterTableRls { table: String, enabled: bool },
+    CreatePolicy {
+        name: String,
+        table: String,
+        cmd: crate::types::schema::PolicyCmd,
+        using_expr: Option<Expr>,
+        with_check: Option<Expr>,
+    },
+    DropPolicy { name: String, table: String },
+    Explain(Box<Statement>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,7 +77,7 @@ pub struct ColumnDef {
     pub primary_key: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Column(String),
     QualifiedColumn { table: String, column: String },
@@ -74,11 +87,14 @@ pub enum Expr {
     Null,
     BinaryOp { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     IsNull { expr: Box<Expr>, negated: bool },
+    InList { expr: Box<Expr>, list: Vec<Expr>, negated: bool },
+    Like { expr: Box<Expr>, pattern: String, negated: bool },
     Aggregate(AggregateFunc),
     JsonExtract { expr: Box<Expr>, path: String, as_text: bool },
+    AuthUid,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AggregateFunc {
     CountStar,
     Count(Box<Expr>),
@@ -88,7 +104,7 @@ pub enum AggregateFunc {
     Max(Box<Expr>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinOp {
     And, Or, Eq, NotEq, Lt, LtEq, Gt, GtEq,
 }
