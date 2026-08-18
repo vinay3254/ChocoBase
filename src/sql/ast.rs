@@ -1,7 +1,7 @@
 use crate::types::value::ColumnType;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Statement {
     CreateTable {
         name: String,
@@ -72,20 +72,20 @@ pub enum Statement {
     Explain(Box<Statement>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SelectColumns {
     All,
     List(Vec<String>),
     Items(Vec<SelectItem>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SelectItem {
     All,
     Expr { expr: Expr, alias: Option<String> },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TableRef {
     Table {
         name: String,
@@ -99,7 +99,7 @@ pub enum TableRef {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum JoinType {
     Inner,
     Left,
@@ -107,7 +107,7 @@ pub enum JoinType {
     Cross,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColumnDef {
     pub name: String,
     pub ty: ColumnType,
@@ -146,6 +146,15 @@ pub enum Expr {
     InList {
         expr: Box<Expr>,
         list: Vec<Expr>,
+        negated: bool,
+    },
+    InSubquery {
+        expr: Box<Expr>,
+        subquery: Box<Statement>,
+        negated: bool,
+    },
+    Exists {
+        subquery: Box<Statement>,
         negated: bool,
     },
     Like {
