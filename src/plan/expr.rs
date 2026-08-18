@@ -89,6 +89,9 @@ pub fn eval_with_context(
         Expr::Aggregate(_) => Err(PlanError::InvalidExpression(
             "aggregate functions cannot be evaluated directly in row context".into(),
         )),
+        Expr::InSubquery { .. } | Expr::Exists { .. } => Err(PlanError::InvalidExpression(
+            "subqueries must be resolved before row-level evaluation".into(),
+        )),
         Expr::JsonExtract {
             expr,
             path,
