@@ -15,6 +15,8 @@ use subtle::ConstantTimeEq;
 
 use crate::error::{DbError, Result};
 
+pub mod oauth;
+
 pub const DEFAULT_JWT_ISSUER: &str = "chocobase-auth";
 pub const DEFAULT_JWT_AUDIENCE: &str = "authenticated";
 pub const DEFAULT_DEV_JWT_SECRET: &[u8] = b"chocobase-development-secret-key-32b!";
