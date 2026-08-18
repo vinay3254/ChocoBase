@@ -159,7 +159,81 @@ pub fn eval_with_context(
                 }
             }
         }
+        Expr::FloatLiteral(f) => Ok(Value::Float(*f)),
+        Expr::VectorDistance {
+            metric,
+            left,
+            right,
+        } => {
+            let l_val = eval_with_context(left, schema, row, ctx)?;
+            let r_val = eval_with_context(right, schema, row, ctx)?;
+            let l_vec = match parse_vector(&l_val) {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let r_vec = match parse_vector(&r_val) {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
+            let dist = match metric {
+                crate::sql::ast::VectorMetric::Cosine => cosine_distance(&l_vec, &r_vec),
+                crate::sql::ast::VectorMetric::L2 => l2_distance(&l_vec, &r_vec),
+                crate::sql::ast::VectorMetric::InnerProduct => inner_product(&l_vec, &r_vec),
+            };
+            Ok(Value::Float(dist))
+        }
     }
+}
+
+pub fn parse_vector(v: &Value) -> Option<Vec<f32>> {
+    match v {
+        Value::Vector(vec) => Some(vec.clone()),
+        Value::Text(s) | Value::Json(s) => serde_json::from_str::<Vec<f32>>(s).ok(),
+        _ => None,
+    }
+}
+
+pub fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 1.0;
+    }
+    let mut dot = 0.0f64;
+    let mut norm_a = 0.0f64;
+    let mut norm_b = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let x64 = *x as f64;
+        let y64 = *y as f64;
+        dot += x64 * y64;
+        norm_a += x64 * x64;
+        norm_b += y64 * y64;
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 1.0;
+    }
+    1.0 - (dot / (norm_a.sqrt() * norm_b.sqrt()))
+}
+
+pub fn l2_distance(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() {
+        return f64::MAX;
+    }
+    let mut sum = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let diff = (*x as f64) - (*y as f64);
+        sum += diff * diff;
+    }
+    sum.sqrt()
+}
+
+pub fn inner_product(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += (*x as f64) * (*y as f64);
+    }
+    dot
 }
 
 fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Value {
