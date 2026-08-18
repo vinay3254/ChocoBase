@@ -5,20 +5,131 @@ use crate::btree::node::LeafNode;
 use crate::catalog::Catalog;
 use crate::error::{DbError, PlanError, Result};
 use crate::exec::Operator;
-use crate::sql::ast::{ColumnDef, Statement, Expr, SelectColumns};
+use crate::sql::ast::{ColumnDef, Statement, Expr, SelectColumns, SelectItem};
 use crate::storage::pager::Pager;
 use crate::types::schema::{Column, TableSchema, IndexSchema};
-use crate::types::value::Value;
+use crate::types::value::{ColumnType, Value};
 
 use crate::storage::lock::LockFile;
+use crate::storage::lock_manager::{LockManager, LockToken};
+use std::sync::{Arc, Mutex};
 
 pub struct Database {
     pager: Pager,
     catalog: Catalog,
     _lock: LockFile,
+    pub change_tx: Option<tokio::sync::broadcast::Sender<crate::server::protocol::ChangeEvent>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Thread-safe facade for sharing one embedded database between client threads.
+/// Each facade instance represents a logical session; clones share storage but
+/// maintain independent explicit transaction state.
+pub struct SharedDatabase {
+    db: Arc<Mutex<Database>>,
+    locks: Arc<LockManager>,
+    transaction: Mutex<Option<LockToken>>,
+    change_tx: tokio::sync::broadcast::Sender<crate::server::protocol::ChangeEvent>,
+}
+
+impl Clone for SharedDatabase {
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            locks: Arc::clone(&self.locks),
+            transaction: Mutex::new(None),
+            change_tx: self.change_tx.clone(),
+        }
+    }
+}
+
+impl SharedDatabase {
+    pub fn create(path: &Path) -> Result<Self> {
+        let (tx, _) = tokio::sync::broadcast::channel(1024);
+        let mut db = Database::create(path)?;
+        db.change_tx = Some(tx.clone());
+        Ok(Self {
+            db: Arc::new(Mutex::new(db)),
+            locks: LockManager::new(),
+            transaction: Mutex::new(None),
+            change_tx: tx,
+        })
+    }
+
+    pub fn open(path: &Path) -> Result<Self> {
+        let (tx, _) = tokio::sync::broadcast::channel(1024);
+        let mut db = Database::open(path)?;
+        db.change_tx = Some(tx.clone());
+        Ok(Self {
+            db: Arc::new(Mutex::new(db)),
+            locks: LockManager::new(),
+            transaction: Mutex::new(None),
+            change_tx: tx,
+        })
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::server::protocol::ChangeEvent> {
+        self.change_tx.subscribe()
+    }
+
+    pub fn execute(&self, sql: &str) -> Result<ExecResult> {
+        let stmt = crate::sql::parser::parse(sql)?;
+        match stmt {
+            Statement::Begin => {
+                let token = self.locks.begin();
+                token.exclusive("database");
+                let mut db = self.db.lock().unwrap();
+                let result = db.execute(sql);
+                if result.is_ok() {
+                    *self.transaction.lock().unwrap() = Some(token);
+                }
+                result
+            }
+            Statement::Commit | Statement::Rollback => {
+                let token = self.transaction.lock().unwrap().take();
+                let mut db = self.db.lock().unwrap();
+                let result = db.execute(sql);
+                drop(token);
+                result
+            }
+            Statement::Select { .. } => {
+                if self.transaction.lock().unwrap().is_some() {
+                    self.db.lock().unwrap().execute(sql)
+                } else {
+                    let token = self.locks.begin();
+                    token.shared("database");
+                    self.db.lock().unwrap().execute(sql)
+                }
+            }
+            _ => {
+                if self.transaction.lock().unwrap().is_some() {
+                    self.db.lock().unwrap().execute(sql)
+                } else {
+                    let token = self.locks.begin();
+                    token.exclusive("database");
+                    self.db.lock().unwrap().execute(sql)
+                }
+            }
+        }
+    }
+
+    pub fn list_tables(&self) -> Vec<String> {
+        self.db.lock().unwrap().list_tables()
+    }
+
+    pub fn table_schema(&self, name: &str) -> Option<TableSchema> {
+        self.db.lock().unwrap().table_schema(name)
+    }
+
+    pub fn list_indexes(&self, table: &str) -> Vec<IndexSchema> {
+        self.db.lock().unwrap().list_indexes(table)
+    }
+
+    pub fn pager_stats(&self) -> crate::storage::pager::PagerStats {
+        self.db.lock().unwrap().pager_stats()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ExecResult {
     Rows { columns: Vec<String>, rows: Vec<Vec<Value>> },
     Modified(usize),
@@ -31,7 +142,7 @@ impl Database {
         let mut pager = Pager::create(path)?;
         let catalog = Catalog::bootstrap(&mut pager)?;
         pager.flush()?;
-        Ok(Database { pager, catalog, _lock: lock })
+        Ok(Database { pager, catalog, _lock: lock, change_tx: None })
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -39,7 +150,7 @@ impl Database {
         let mut pager = Pager::open(path)?;
         let catalog = Catalog::bootstrap(&mut pager)?;
         pager.flush()?;
-        Ok(Database { pager, catalog, _lock: lock })
+        Ok(Database { pager, catalog, _lock: lock, change_tx: None })
     }
 
     pub fn execute(&mut self, sql: &str) -> Result<ExecResult> {
@@ -67,8 +178,17 @@ impl Database {
                 self.catalog = Catalog::bootstrap(&mut self.pager)?;
                 Ok(ExecResult::Ok)
             }
-            Statement::Select { columns, table, where_clause, order_by, limit } => {
-                self.execute_select(columns, &table, where_clause, order_by, limit)
+            Statement::Select {
+                columns,
+                table,
+                table_ref,
+                where_clause,
+                group_by,
+                having,
+                order_by,
+                limit,
+            } => {
+                self.execute_select(columns, &table, table_ref, where_clause, group_by, having, order_by, limit)
             }
             mutating_stmt => {
                 if self.pager.in_transaction() {
@@ -186,31 +306,39 @@ impl Database {
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
         let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
 
-        let target_indices: Vec<usize> = match &columns {
-            Some(names) => {
-                let mut idxs = Vec::new();
-                for n in names {
-                    idxs.push(schema.column_index(n).ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?);
-                }
-                idxs
-            }
-            None => (0..schema.columns.len()).collect(),
-        };
-
-        let mut count = 0usize;
         let mut table_root = schema.root_page;
         let mut index_roots: HashMap<String, u32> =
             indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
+        let mut count = 0usize;
 
-        for row_exprs in rows {
-            if row_exprs.len() != target_indices.len() {
-                return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
-                    "value count does not match column count".into(),
-                )));
-            }
+        for expr_row in &rows {
             let mut full_row = vec![Value::Null; schema.columns.len()];
-            for (expr, &col_idx) in row_exprs.iter().zip(target_indices.iter()) {
-                full_row[col_idx] = literal_to_value(expr)?;
+            match &columns {
+                Some(col_names) => {
+                    if col_names.len() != expr_row.len() {
+                        return Err(DbError::Plan(PlanError::ColumnCountMismatch {
+                            expected: col_names.len(),
+                            found: expr_row.len(),
+                        }));
+                    }
+                    for (cname, expr) in col_names.iter().zip(expr_row.iter()) {
+                        let idx = schema
+                            .column_index(cname)
+                            .ok_or_else(|| PlanError::NoSuchColumn(cname.clone()))?;
+                        full_row[idx] = literal_to_value_typed(expr, Some(&schema.columns[idx].ty))?;
+                    }
+                }
+                None => {
+                    if expr_row.len() != schema.columns.len() {
+                        return Err(DbError::Plan(PlanError::ColumnCountMismatch {
+                            expected: schema.columns.len(),
+                            found: expr_row.len(),
+                        }));
+                    }
+                    for (i, expr) in expr_row.iter().enumerate() {
+                        full_row[i] = literal_to_value_typed(expr, Some(&schema.columns[i].ty))?;
+                    }
+                }
             }
 
             let mut schema_for_write = schema.clone();
@@ -229,6 +357,109 @@ impl Database {
             table_root = new_table_root;
             for (name, root) in new_index_roots {
                 index_roots.insert(name, root);
+            }
+            if let Some(tx) = &self.change_tx {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let _ = tx.send(crate::server::protocol::ChangeEvent {
+                    table: table.to_string(),
+                    action: crate::server::protocol::ChangeAction::Insert,
+                    old_row: None,
+                    new_row: Some(full_row.clone()),
+                    timestamp_ms: now,
+                });
+            }
+            count += 1;
+        }
+
+        if table_root != schema.root_page {
+            self.catalog.update_table_root(&mut self.pager, table, table_root)?;
+        }
+        for idx in &indexes {
+            let new_root = index_roots[&idx.name];
+            if new_root != idx.root_page {
+                self.catalog.update_index_root(&mut self.pager, &idx.name, new_root)?;
+            }
+        }
+
+        Ok(ExecResult::Modified(count))
+    }
+
+    fn execute_update(
+        &mut self,
+        table: &str,
+        assignments: Vec<(String, Expr)>,
+        where_clause: Option<Expr>,
+    ) -> Result<ExecResult> {
+        let schema = self
+            .catalog
+            .get_table(&mut self.pager, table)?
+            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
+        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+
+        let mut assignment_indices = Vec::new();
+        for (col_name, expr) in &assignments {
+            let idx = schema
+                .column_index(col_name)
+                .ok_or_else(|| PlanError::NoSuchColumn(col_name.clone()))?;
+            assignment_indices.push((idx, expr.clone()));
+        }
+
+        let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
+        let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, all_columns, None, None)?;
+        let mut old_rows = Vec::new();
+        while let Some(row) = plan.next(&mut self.pager)? {
+            old_rows.push(row);
+        }
+
+        let mut table_root = schema.root_page;
+        let mut index_roots: HashMap<String, u32> =
+            indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
+        let mut count = 0usize;
+
+        for old_row in &old_rows {
+            let mut new_row = old_row.clone();
+            for (idx, expr) in &assignment_indices {
+                new_row[*idx] =
+                    crate::plan::expr::eval(expr, &schema, old_row).map_err(DbError::Plan)?;
+            }
+
+            let mut schema_for_write = schema.clone();
+            schema_for_write.root_page = table_root;
+            let indexes_for_write: Vec<IndexSchema> = indexes
+                .iter()
+                .cloned()
+                .map(|mut idx| {
+                    idx.root_page = index_roots[&idx.name];
+                    idx
+                })
+                .collect();
+
+            let (new_table_root, new_index_roots) = crate::exec::mutate::update_row(
+                &mut self.pager,
+                &schema_for_write,
+                &indexes_for_write,
+                old_row,
+                &new_row,
+            )?;
+            table_root = new_table_root;
+            for (name, root) in new_index_roots {
+                index_roots.insert(name, root);
+            }
+            if let Some(tx) = &self.change_tx {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let _ = tx.send(crate::server::protocol::ChangeEvent {
+                    table: table.to_string(),
+                    action: crate::server::protocol::ChangeAction::Update,
+                    old_row: Some(old_row.clone()),
+                    new_row: Some(new_row.clone()),
+                    timestamp_ms: now,
+                });
             }
             count += 1;
         }
@@ -250,15 +481,171 @@ impl Database {
         &mut self,
         columns: SelectColumns,
         table: &str,
+        table_ref: Option<crate::sql::ast::TableRef>,
         where_clause: Option<Expr>,
+        _group_by: Option<Vec<Expr>>,
+        _having: Option<Expr>,
         order_by: Option<(String, bool)>,
         limit: Option<i64>,
     ) -> Result<ExecResult> {
+        let is_join = match &table_ref {
+            Some(crate::sql::ast::TableRef::Join { .. }) => true,
+            _ => false,
+        };
+
+        if is_join {
+            let tref = table_ref.unwrap();
+            let (mut plan, schema) = crate::plan::planner::build_table_ref_plan(&mut self.catalog, &mut self.pager, &tref)?;
+            if let Some(predicate) = where_clause {
+                plan = Box::new(crate::exec::filter::Filter { input: plan, schema: schema.clone(), predicate });
+            }
+
+            let (out_names, indices) = match &columns {
+                SelectColumns::All => (
+                    schema.columns.iter().map(|c| c.name.clone()).collect(),
+                    (0..schema.columns.len()).collect(),
+                ),
+                SelectColumns::List(names) => {
+                    let mut idxs = Vec::new();
+                    for n in names {
+                        let idx = schema.column_index(n).ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?;
+                        idxs.push(idx);
+                    }
+                    (names.clone(), idxs)
+                }
+                SelectColumns::Items(items) => {
+                    let mut names = Vec::new();
+                    let mut exprs = Vec::new();
+                    for item in items {
+                        match item {
+                            SelectItem::All => {
+                                for col in &schema.columns {
+                                    names.push(col.name.clone());
+                                    exprs.push(Expr::Column(col.name.clone()));
+                                }
+                            }
+                            SelectItem::Expr { expr, alias } => {
+                                let name = alias.clone().unwrap_or_else(|| match expr {
+                                    Expr::Column(c) => c.clone(),
+                                    Expr::QualifiedColumn { table, column } => format!("{table}.{column}"),
+                                    Expr::JsonExtract { path, .. } => path.clone(),
+                                    _ => "expr".into(),
+                                });
+                                names.push(name);
+                                exprs.push(expr.clone());
+                            }
+                        }
+                    }
+
+                    if let Some((col, desc)) = order_by {
+                        let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
+                        plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
+                    }
+                    plan = Box::new(crate::exec::project::ProjectExpr { input: plan, schema: schema.clone(), exprs });
+                    if let Some(n) = limit {
+                        plan = Box::new(crate::exec::limit::Limit::new(plan, n));
+                    }
+
+                    let mut rows = Vec::new();
+                    while let Some(row) = plan.next(&mut self.pager)? {
+                        rows.push(row);
+                    }
+                    return Ok(ExecResult::Rows { columns: names, rows });
+                }
+            };
+
+            if let Some((col, desc)) = order_by {
+                let idx = schema.column_index(&col).ok_or_else(|| PlanError::NoSuchColumn(col))?;
+                plan = Box::new(crate::exec::sort::Sort::new(plan, idx, desc));
+            }
+            plan = Box::new(crate::exec::project::Project { input: plan, indices });
+            if let Some(n) = limit {
+                plan = Box::new(crate::exec::limit::Limit::new(plan, n));
+            }
+
+            let mut rows = Vec::new();
+            while let Some(row) = plan.next(&mut self.pager)? {
+                rows.push(row);
+            }
+            return Ok(ExecResult::Rows { columns: out_names, rows });
+        }
+
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
             .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
         let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
+
+        let has_group_by = _group_by.is_some();
+        let has_agg = match &columns {
+            SelectColumns::Items(items) => items.iter().any(|item| match item {
+                SelectItem::Expr { expr: Expr::Aggregate(_), .. } => true,
+                _ => false,
+            }),
+            _ => false,
+        };
+
+        if has_group_by || has_agg {
+            let mut aggregates = Vec::new();
+            let mut out_names = Vec::new();
+            let mut group_exprs = _group_by.clone().unwrap_or_default();
+
+            if let SelectColumns::Items(items) = &columns {
+                for item in items {
+                    match item {
+                        SelectItem::Expr { expr: Expr::Aggregate(func), alias } => {
+                            aggregates.push(func.clone());
+                            let name = alias.clone().unwrap_or_else(|| match func {
+                                crate::sql::ast::AggregateFunc::CountStar => "count(*)".into(),
+                                crate::sql::ast::AggregateFunc::Count(_) => "count".into(),
+                                crate::sql::ast::AggregateFunc::Sum(_) => "sum".into(),
+                                crate::sql::ast::AggregateFunc::Avg(_) => "avg".into(),
+                                crate::sql::ast::AggregateFunc::Min(_) => "min".into(),
+                                crate::sql::ast::AggregateFunc::Max(_) => "max".into(),
+                            });
+                            out_names.push(name);
+                        }
+                        SelectItem::Expr { expr, alias } => {
+                            let name = alias.clone().unwrap_or_else(|| match expr {
+                                Expr::Column(c) => c.clone(),
+                                Expr::QualifiedColumn { column, .. } => column.clone(),
+                                _ => "expr".into(),
+                            });
+                            out_names.push(name);
+                            if !has_group_by && !group_exprs.contains(expr) {
+                                group_exprs.push(expr.clone());
+                            }
+                        }
+                        SelectItem::All => return Err(DbError::Plan(PlanError::InvalidExpression("cannot use SELECT * with aggregations".into()))),
+                    }
+                }
+            }
+
+            let seq_scan: Box<dyn Operator> = Box::new(crate::exec::scan::SeqScan::new(schema.clone()));
+            let scan_plan = if let Some(predicate) = where_clause {
+                Box::new(crate::exec::filter::Filter { input: seq_scan, schema: schema.clone(), predicate })
+            } else {
+                seq_scan
+            };
+
+            let mut plan: Box<dyn Operator> = Box::new(crate::exec::aggregate::AggregateOperator::new(
+                scan_plan,
+                schema.clone(),
+                if group_exprs.is_empty() { None } else { Some(group_exprs) },
+                aggregates,
+                _having,
+            ));
+
+            if let Some(n) = limit {
+                plan = Box::new(crate::exec::limit::Limit::new(plan, n));
+            }
+
+            let mut rows = Vec::new();
+            while let Some(row) = plan.next(&mut self.pager)? {
+                rows.push(row);
+            }
+            return Ok(ExecResult::Rows { columns: out_names, rows });
+        }
 
         let (out_names, indices): (Vec<String>, Vec<usize>) = match &columns {
             SelectColumns::All => (
@@ -271,6 +658,42 @@ impl Database {
                     idxs.push(schema.column_index(n).ok_or_else(|| PlanError::NoSuchColumn(n.clone()))?);
                 }
                 (names.clone(), idxs)
+            }
+            SelectColumns::Items(items) => {
+                let mut names = Vec::new();
+                let mut exprs = Vec::new();
+                for item in items {
+                    match item {
+                        SelectItem::All => {
+                            for col in &schema.columns {
+                                names.push(col.name.clone());
+                                exprs.push(Expr::Column(col.name.clone()));
+                            }
+                        }
+                        SelectItem::Expr { expr, alias } => {
+                            let name = alias.clone().unwrap_or_else(|| match expr {
+                                Expr::Column(c) => c.clone(),
+                                Expr::QualifiedColumn { column, .. } => column.clone(),
+                                Expr::JsonExtract { path, .. } => path.clone(),
+                                _ => "expr".into(),
+                            });
+                            names.push(name);
+                            exprs.push(expr.clone());
+                        }
+                    }
+                }
+
+                let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
+                let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, all_columns, order_by, None)?;
+                plan = Box::new(crate::exec::project::ProjectExpr { input: plan, schema: schema.clone(), exprs });
+                if let Some(n) = limit {
+                    plan = Box::new(crate::exec::limit::Limit::new(plan, n));
+                }
+                let mut rows = Vec::new();
+                while let Some(row) = plan.next(&mut self.pager)? {
+                    rows.push(row);
+                }
+                return Ok(ExecResult::Rows { columns: names, rows });
             }
         };
 
@@ -319,80 +742,18 @@ impl Database {
             for (name, root) in new_index_roots {
                 index_roots.insert(name, root);
             }
-            count += 1;
-        }
-
-        if table_root != schema.root_page {
-            self.catalog.update_table_root(&mut self.pager, table, table_root)?;
-        }
-        for idx in &indexes {
-            let new_root = index_roots[&idx.name];
-            if new_root != idx.root_page {
-                self.catalog.update_index_root(&mut self.pager, &idx.name, new_root)?;
-            }
-        }
-
-        Ok(ExecResult::Modified(count))
-    }
-
-    fn execute_update(
-        &mut self,
-        table: &str,
-        assignments: Vec<(String, Expr)>,
-        where_clause: Option<Expr>,
-    ) -> Result<ExecResult> {
-        let schema = self
-            .catalog
-            .get_table(&mut self.pager, table)?
-            .ok_or_else(|| PlanError::NoSuchTable(table.to_string()))?;
-        let indexes = self.catalog.list_indexes_for_table(&mut self.pager, table)?;
-
-        let mut assignment_indices = Vec::new();
-        for (name, expr) in assignments {
-            let idx = schema.column_index(&name).ok_or_else(|| PlanError::NoSuchColumn(name.clone()))?;
-            assignment_indices.push((idx, expr));
-        }
-
-        let all_columns: Vec<usize> = (0..schema.columns.len()).collect();
-        let mut plan = crate::plan::planner::build_select_plan(&schema, &indexes, where_clause, all_columns, None, None)?;
-        let mut old_rows = Vec::new();
-        while let Some(row) = plan.next(&mut self.pager)? {
-            old_rows.push(row);
-        }
-
-        let mut table_root = schema.root_page;
-        let mut index_roots: HashMap<String, u32> =
-            indexes.iter().map(|i| (i.name.clone(), i.root_page)).collect();
-        let mut count = 0usize;
-
-        for old_row in &old_rows {
-            let mut new_row = old_row.clone();
-            for (idx, expr) in &assignment_indices {
-                new_row[*idx] =
-                    crate::plan::expr::eval(expr, &schema, old_row).map_err(DbError::Plan)?;
-            }
-
-            let mut schema_for_write = schema.clone();
-            schema_for_write.root_page = table_root;
-            let indexes_for_write: Vec<IndexSchema> = indexes
-                .iter()
-                .cloned()
-                .map(|mut idx| {
-                    idx.root_page = index_roots[&idx.name];
-                    idx
-                })
-                .collect();
-
-            let (new_table_root, new_index_roots) = crate::exec::mutate::update_row(
-                &mut self.pager,
-                &schema_for_write,
-                &indexes_for_write,
-                old_row,
-                &new_row,
-            )?;
-            table_root = new_table_root;
-            for (name, root) in new_index_roots {
-                index_roots.insert(name, root);
+            if let Some(tx) = &self.change_tx {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let _ = tx.send(crate::server::protocol::ChangeEvent {
+                    table: table.to_string(),
+                    action: crate::server::protocol::ChangeAction::Delete,
+                    old_row: Some(row.clone()),
+                    new_row: None,
+                    timestamp_ms: now,
+                });
             }
             count += 1;
         }
@@ -445,14 +806,22 @@ impl Drop for Database {
     }
 }
 
+#[allow(dead_code)]
 fn literal_to_value(expr: &Expr) -> Result<Value> {
+    literal_to_value_typed(expr, None)
+}
+
+fn literal_to_value_typed(expr: &Expr, target_type: Option<&ColumnType>) -> Result<Value> {
     match expr {
         Expr::IntLiteral(n) => Ok(Value::Integer(*n)),
-        Expr::StringLiteral(s) => Ok(Value::Text(s.clone())),
+        Expr::StringLiteral(s) => match target_type {
+            Some(ColumnType::Json) => Ok(Value::Json(s.clone())),
+            _ => Ok(Value::Text(s.clone())),
+        },
         Expr::BoolLiteral(b) => Ok(Value::Boolean(*b)),
         Expr::Null => Ok(Value::Null),
         other => Err(DbError::Exec(crate::error::ExecError::InvalidValue(format!(
-            "expected a literal value in INSERT, found {other:?}"
+            "expected a literal value in statement, found {other:?}"
         )))),
     }
 }
@@ -778,5 +1147,3 @@ mod tests {
         let _ = child.wait();
     }
 }
-
-

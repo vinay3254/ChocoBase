@@ -8,20 +8,32 @@ pub enum StorageError {
     NotADatabase,
     #[error("corrupt page {0}: {1}")]
     CorruptPage(u32, String),
-    #[error("page {0} out of range")]
-    PageOutOfRange(u32),
-    #[error("corrupt journal: {0}")]
+    #[error("database file is corrupted: {0}")]
+    CorruptDatabase(String),
+    #[error("journal file is corrupted: {0}")]
     CorruptJournal(String),
-    #[error("database is locked: {0}")]
+    #[error("page number {0} is out of bounds")]
+    PageOutOfBounds(u32),
+    #[error("buffer pool is full with pinned frames")]
+    BufferPoolFull,
+    #[error("database is locked by another active process ({0})")]
     DatabaseLocked(String),
 }
 
 #[derive(Debug, Error)]
 pub enum BTreeError {
-    #[error("row too large: {0} bytes exceeds page size {1}")]
-    RowTooLarge(usize, usize),
     #[error("duplicate key")]
     DuplicateKey,
+    #[error("row size {0} exceeds max allowable page payload {1}")]
+    RowTooLarge(usize, usize),
+    #[error("key size {0} exceeds maximum allowable length")]
+    KeyTooLarge(usize),
+    #[error("value size {0} exceeds maximum allowable length")]
+    ValueTooLarge(usize),
+    #[error("node {0} has corrupt or invalid format")]
+    CorruptNode(u32),
+    #[error("cannot split root node: no free pages available")]
+    NoFreePages,
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
@@ -46,6 +58,10 @@ pub enum PlanError {
     IndexAlreadyExists(String),
     #[error("invalid schema: {0}")]
     InvalidSchema(String),
+    #[error("invalid expression: {0}")]
+    InvalidExpression(String),
+    #[error("column count mismatch: expected {expected}, found {found}")]
+    ColumnCountMismatch { expected: usize, found: usize },
     #[error("nested transactions are not supported")]
     NestedTransactionNotSupported,
     #[error("cannot commit or rollback: no transaction is in progress")]
@@ -78,6 +94,8 @@ pub enum DbError {
     Plan(#[from] PlanError),
     #[error(transparent)]
     Exec(#[from] ExecError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;

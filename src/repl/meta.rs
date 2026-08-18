@@ -31,6 +31,7 @@ fn schema_text(db: &mut Database, table: &str) -> String {
                         crate::types::value::ColumnType::Integer => "INTEGER",
                         crate::types::value::ColumnType::Text => "TEXT",
                         crate::types::value::ColumnType::Boolean => "BOOLEAN",
+                        crate::types::value::ColumnType::Json => "JSON",
                     };
                     let mut parts = vec![c.name.clone(), ty.to_string()];
                     if c.not_null {

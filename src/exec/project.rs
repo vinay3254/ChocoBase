@@ -17,6 +17,29 @@ impl Operator for Project {
     }
 }
 
+pub struct ProjectExpr {
+    pub input: Box<dyn Operator>,
+    pub schema: crate::types::schema::TableSchema,
+    pub exprs: Vec<crate::sql::ast::Expr>,
+}
+
+impl Operator for ProjectExpr {
+    fn next(&mut self, pager: &mut Pager) -> Result<Option<Vec<Value>>, ExecError> {
+        match self.input.next(pager)? {
+            Some(row) => {
+                let mut out = Vec::with_capacity(self.exprs.len());
+                for expr in &self.exprs {
+                    let val = crate::plan::expr::eval(expr, &self.schema, &row)
+                        .map_err(|e| ExecError::InvalidValue(e.to_string()))?;
+                    out.push(val);
+                }
+                Ok(Some(out))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,6 +4,8 @@ pub mod project;
 pub mod sort;
 pub mod limit;
 pub mod mutate;
+pub mod join;
+pub mod aggregate;
 
 use crate::error::ExecError;
 use crate::storage::pager::Pager;
