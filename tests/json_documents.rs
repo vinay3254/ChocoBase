@@ -52,3 +52,15 @@ fn json_extract_nested_properties_and_arrays() {
         other => panic!("unexpected result: {other:?}"),
     }
 }
+
+#[test]
+fn invalid_json_rejected_on_insert() {
+    let file = NamedTempFile::new().unwrap();
+    let mut db = Database::create(file.path()).unwrap();
+
+    db.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, data JSON)").unwrap();
+
+    // Inserting malformed JSON syntax must be rejected
+    let res = db.execute("INSERT INTO docs (id, data) VALUES (1, '{unquoted_key: 123')");
+    assert!(res.is_err(), "malformed JSON syntax must be rejected on insert");
+}
