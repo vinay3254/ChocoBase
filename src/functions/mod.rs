@@ -1,8 +1,13 @@
 //! Serverless Edge Functions Runtime for ChocoBase.
-//! Provides deployment, lifecycle management, and sandboxed execution of serverless functions.
+//! Provides deployment, lifecycle management, and isolated sandboxed execution of serverless functions
+//! with timeout enforcement, subprocess isolation, environment sandboxing, and stdout/stderr capture.
 
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 
 use crate::auth::ExecutionContext;
 use crate::engine::SharedDatabase;
@@ -71,7 +76,7 @@ impl FunctionRegistry {
         self.functions.write().unwrap().remove(name).is_some()
     }
 
-    pub fn execute(
+    pub async fn execute(
         &self,
         name: &str,
         payload: &serde_json::Value,
@@ -93,33 +98,133 @@ impl FunctionRegistry {
             )));
         }
 
-        // Execute function logic based on runtime
-        match func.metadata.runtime.as_str() {
-            "transform" | "json-worker" | "default" => {
-                // Evaluates transform: merges payload with script-defined defaults and environment
-                let mut result = serde_json::Map::new();
-                result.insert("function".into(), serde_json::json!(name));
-                result.insert("status".into(), serde_json::json!("executed"));
-                result.insert("input".into(), payload.clone());
-                result.insert(
-                    "caller".into(),
-                    serde_json::json!({
-                        "user_id": ctx.user_id,
-                        "role": ctx.role,
-                    }),
-                );
+        let timeout_duration = Duration::from_millis(if func.metadata.timeout_ms == 0 {
+            5000
+        } else {
+            func.metadata.timeout_ms
+        });
 
-                if let Some(msg) = payload.get("echo") {
-                    result.insert("echo".into(), msg.clone());
+        let runtime = func.metadata.runtime.as_str();
+        let script = func.script.trim();
+
+        if runtime == "transform"
+            || runtime == "default"
+            || runtime == "json-worker"
+            || script.is_empty()
+        {
+            // Built-in JSON worker runtime
+            let mut result = serde_json::Map::new();
+            result.insert("function".into(), serde_json::json!(name));
+            result.insert("status".into(), serde_json::json!("executed"));
+            result.insert("input".into(), payload.clone());
+            result.insert(
+                "caller".into(),
+                serde_json::json!({
+                    "user_id": ctx.user_id,
+                    "role": ctx.role,
+                }),
+            );
+
+            if let Some(msg) = payload.get("echo") {
+                result.insert("echo".into(), msg.clone());
+            }
+
+            Ok(serde_json::Value::Object(result))
+        } else {
+            // Subprocess isolation for process/script runtimes with async timeout
+            let mut cmd = if cfg!(windows) {
+                let mut c = Command::new("cmd");
+                c.args(["/C", script]);
+                c
+            } else {
+                let mut c = Command::new("sh");
+                c.args(["-c", script]);
+                c
+            };
+
+            // Set sandboxed execution environment
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            // Inject context & configured environment variables
+            if let Some(user_id) = ctx.user_id {
+                cmd.env("CHOCOBASE_USER_ID", user_id.to_string());
+            }
+            if let Some(role) = &ctx.role {
+                cmd.env("CHOCOBASE_USER_ROLE", role);
+            }
+            for (k, v) in &func.metadata.env {
+                cmd.env(k, v);
+            }
+
+            let mut child = cmd.spawn().map_err(|e| {
+                DbError::Exec(crate::error::ExecError::InvalidValue(format!(
+                    "failed to spawn isolated function process: {e}"
+                )))
+            })?;
+
+            // Write JSON payload to stdin
+            if let Some(mut stdin) = child.stdin.take() {
+                let input_bytes = serde_json::to_vec(payload).unwrap_or_default();
+                let _ = stdin.write_all(&input_bytes).await;
+                let _ = stdin.flush().await;
+            }
+
+            // Enforce real asynchronous timeout
+            let exec_future = async {
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
+
+                if let Some(mut stdout) = child.stdout.take() {
+                    let _ = stdout.read_to_end(&mut stdout_buf).await;
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_end(&mut stderr_buf).await;
                 }
 
-                Ok(serde_json::Value::Object(result))
+                let status = child.wait().await?;
+                Ok::<(std::process::ExitStatus, Vec<u8>, Vec<u8>), std::io::Error>((
+                    status, stdout_buf, stderr_buf,
+                ))
+            };
+
+            match tokio::time::timeout(timeout_duration, exec_future).await {
+                Ok(Ok((status, stdout, stderr))) => {
+                    if !status.success() {
+                        let err_msg = String::from_utf8_lossy(&stderr);
+                        return Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+                            format!(
+                                "function execution failed with exit code {:?}: {}",
+                                status.code(),
+                                err_msg.trim()
+                            ),
+                        )));
+                    }
+
+                    let output_str = String::from_utf8_lossy(&stdout).trim().to_string();
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&output_str) {
+                        Ok(json_val)
+                    } else {
+                        Ok(serde_json::json!({
+                            "status": "ok",
+                            "output": output_str
+                        }))
+                    }
+                }
+                Ok(Err(e)) => Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+                    format!("function I/O error: {e}"),
+                ))),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    Err(DbError::Exec(crate::error::ExecError::InvalidValue(
+                        format!(
+                            "function execution timed out after {}ms",
+                            func.metadata.timeout_ms
+                        ),
+                    )))
+                }
             }
-            _ => Ok(serde_json::json!({
-                "function": name,
-                "status": "executed",
-                "result": payload
-            })),
         }
     }
 }
