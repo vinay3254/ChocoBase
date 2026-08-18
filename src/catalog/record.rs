@@ -6,6 +6,7 @@ const KIND_INDEX: u8 = 2;
 const TYPE_INTEGER: u8 = 1;
 const TYPE_TEXT: u8 = 2;
 const TYPE_BOOLEAN: u8 = 3;
+const TYPE_JSON: u8 = 4;
 
 pub fn record_kind(data: &[u8]) -> u8 {
     data[0]
@@ -27,6 +28,7 @@ fn type_tag(ty: &ColumnType) -> u8 {
         ColumnType::Integer => TYPE_INTEGER,
         ColumnType::Text => TYPE_TEXT,
         ColumnType::Boolean => TYPE_BOOLEAN,
+        ColumnType::Json => TYPE_JSON,
     }
 }
 
@@ -35,6 +37,7 @@ fn type_from_tag(tag: u8) -> ColumnType {
         TYPE_INTEGER => ColumnType::Integer,
         TYPE_TEXT => ColumnType::Text,
         TYPE_BOOLEAN => ColumnType::Boolean,
+        TYPE_JSON => ColumnType::Json,
         _ => panic!("unknown column type tag {tag}"),
     }
 }

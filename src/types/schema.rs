@@ -1,6 +1,6 @@
 use crate::types::value::ColumnType;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Column {
     pub name: String,
     pub ty: ColumnType,
@@ -8,14 +8,14 @@ pub struct Column {
     pub is_primary_key: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<Column>,
     pub root_page: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IndexSchema {
     pub name: String,
     pub table: String,

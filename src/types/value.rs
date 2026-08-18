@@ -1,15 +1,19 @@
-#[derive(Debug, Clone, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnType {
     Integer,
     Text,
     Boolean,
+    Json,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
     Integer(i64),
     Text(String),
     Boolean(bool),
+    Json(String),
     Null,
 }
 
@@ -20,7 +24,7 @@ pub fn encode_key(v: &Value) -> Vec<u8> {
             flipped.to_be_bytes().to_vec()
         }
         Value::Boolean(b) => vec![if *b { 1 } else { 0 }],
-        Value::Text(s) => {
+        Value::Text(s) | Value::Json(s) => {
             let mut out = s.as_bytes().to_vec();
             out.push(0);
             out
@@ -41,6 +45,7 @@ pub fn sql_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::Text(x), Value::Text(y)) => x.cmp(y),
+        (Value::Json(x), Value::Json(y)) => x.cmp(y),
         (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
         _ => panic!("cannot compare values of different types: {:?} vs {:?}", a, b),
     }

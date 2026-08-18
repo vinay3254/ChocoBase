@@ -16,10 +16,10 @@ pub fn encode_row(schema: &TableSchema, values: &[Value]) -> Vec<u8> {
             Value::Null => {}
             Value::Integer(i) => out.extend(&i.to_le_bytes()),
             Value::Boolean(b) => out.push(if *b { 1 } else { 0 }),
-            Value::Text(s) => {
+            Value::Text(s) | Value::Json(s) => {
                 assert!(
                     s.len() <= u16::MAX as usize,
-                    "text value of {} bytes exceeds the {}-byte length-prefix limit",
+                    "text or JSON value of {} bytes exceeds the {}-byte length-prefix limit",
                     s.len(),
                     u16::MAX
                 );
@@ -59,6 +59,13 @@ pub fn decode_row(schema: &TableSchema, data: &[u8]) -> Vec<Value> {
                 let s = String::from_utf8(data[pos..pos + len].to_vec()).unwrap();
                 pos += len;
                 values.push(Value::Text(s));
+            }
+            ColumnType::Json => {
+                let len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+                pos += 2;
+                let s = String::from_utf8(data[pos..pos + len].to_vec()).unwrap();
+                pos += len;
+                values.push(Value::Json(s));
             }
         }
     }
