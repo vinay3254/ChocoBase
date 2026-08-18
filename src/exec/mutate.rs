@@ -261,7 +261,7 @@ mod tests {
         let (_, new_index_roots) = insert_row(
             &mut pager,
             &s,
-            &[idx.clone()],
+            std::slice::from_ref(&idx),
             &[Value::Integer(1), Value::Text("a".into())],
         )
         .unwrap();
@@ -302,7 +302,7 @@ mod tests {
         let (table_root, roots) = insert_row(
             &mut pager,
             &s,
-            &[idx.clone()],
+            std::slice::from_ref(&idx),
             &[Value::Integer(1), Value::Text("a".into())],
         )
         .unwrap();
@@ -361,7 +361,7 @@ mod tests {
         let (table_root, roots) = insert_row(
             &mut pager,
             &s,
-            &[idx.clone()],
+            std::slice::from_ref(&idx),
             &[Value::Integer(1), Value::Text("a".into())],
         )
         .unwrap();
