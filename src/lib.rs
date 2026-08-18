@@ -23,3 +23,4 @@ pub use functions::{FunctionMetadata, FunctionRegistry};
 pub use http::HttpServer;
 pub use migration::{AppliedMigration, Migration, MigrationRunner};
 pub use server::{Server, ServerConfig};
+pub use types::value::Value;
