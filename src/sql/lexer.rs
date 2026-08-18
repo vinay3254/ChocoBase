@@ -235,23 +235,47 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
             c if c.is_ascii_digit() => {
                 let mut end = start + c.len_utf8();
                 chars.next();
+                let mut has_dot = false;
                 while let Some(&(p, c2)) = chars.peek() {
                     if c2.is_ascii_digit() {
                         end = p + c2.len_utf8();
                         chars.next();
+                    } else if c2 == '.' && !has_dot {
+                        let mut lookahead = chars.clone();
+                        lookahead.next();
+                        if let Some(&(_, next_c)) = lookahead.peek() {
+                            if next_c.is_ascii_digit() {
+                                has_dot = true;
+                                end = p + c2.len_utf8();
+                                chars.next();
+                                continue;
+                            }
+                        }
+                        break;
                     } else {
                         break;
                     }
                 }
                 let text = &src[start..end];
-                let n: i64 = text.parse().map_err(|_| ParseError::Syntax {
-                    offset: start,
-                    message: "invalid integer literal".into(),
-                })?;
-                tokens.push(SpannedToken {
-                    token: Token::IntLiteral(n),
-                    offset: start,
-                });
+                if has_dot {
+                    let f: f64 = text.parse().map_err(|_| ParseError::Syntax {
+                        offset: start,
+                        message: "invalid float literal".into(),
+                    })?;
+                    tokens.push(SpannedToken {
+                        token: Token::FloatLiteral(f),
+                        offset: start,
+                    });
+                } else {
+                    let n: i64 = text.parse().map_err(|_| ParseError::Syntax {
+                        offset: start,
+                        message: "invalid integer literal".into(),
+                    })?;
+                    tokens.push(SpannedToken {
+                        token: Token::IntLiteral(n),
+                        offset: start,
+                    });
+                }
             }
             c if c.is_alphabetic() || c == '_' => {
                 let mut end = start + c.len_utf8();
@@ -331,6 +355,11 @@ fn keyword_or_identifier(text: &str) -> Token {
         "MIN" => Token::Min,
         "MAX" => Token::Max,
         "INTEGER" => Token::KwInteger,
+        "FLOAT" | "REAL" | "DOUBLE" => Token::KwFloat,
+        "VECTOR" => Token::KwVector,
+        "COSINE_DISTANCE" => Token::CosineDistance,
+        "L2_DISTANCE" => Token::L2Distance,
+        "INNER_PRODUCT" => Token::InnerProduct,
         "TEXT" => Token::KwText,
         "BOOLEAN" => Token::KwBoolean,
         "JSON" => Token::KwJson,
