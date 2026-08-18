@@ -86,6 +86,7 @@ mod tests {
                 Column { name: "active".into(), ty: ColumnType::Boolean, not_null: false, is_primary_key: false },
             ],
             root_page: 0,
+            rls_enabled: false,
         }
     }
 
