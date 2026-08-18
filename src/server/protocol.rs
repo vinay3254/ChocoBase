@@ -27,6 +27,10 @@ pub struct ChangeEvent {
 /// Client request sent to ChocoBase server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
+    /// Authenticate session with username and password.
+    Auth { username: String, password: String },
+    /// Authenticate session with a JWT bearer token.
+    Token { token: String },
     /// Execute a SQL statement or query.
     Query { sql: String },
     /// Heartbeat ping to check connection liveness.
@@ -40,6 +44,12 @@ pub enum Request {
 /// Server response returned to client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
+    /// Successful session authentication.
+    AuthOk {
+        user_id: i64,
+        username: String,
+        role: String,
+    },
     /// Successful query execution result.
     Result(ExecResult),
     /// Execution or syntax error.
@@ -105,7 +115,7 @@ pub async fn read_request<R: AsyncReadExt + Unpin>(
             if buffer.is_empty() {
                 return Ok(None);
             }
-            let text = buffer.drain(..).collect::<Vec<u8>>();
+            let text = std::mem::take(buffer);
             let req: Request = serde_json::from_slice(&text)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             return Ok(Some(req));
@@ -137,7 +147,7 @@ pub async fn read_response<R: AsyncReadExt + Unpin>(
             if buffer.is_empty() {
                 return Ok(None);
             }
-            let text = buffer.drain(..).collect::<Vec<u8>>();
+            let text = std::mem::take(buffer);
             let resp: Response = serde_json::from_slice(&text)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             return Ok(Some(resp));
