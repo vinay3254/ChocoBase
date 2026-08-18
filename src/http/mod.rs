@@ -38,6 +38,8 @@ impl HttpServer {
 
         let functions_reg = Arc::new(FunctionRegistry::new());
         let realtime_mgr = Arc::new(RealtimeChannelManager::new());
+        let webhook_mgr = Arc::new(crate::webhooks::WebhookManager::new());
+        webhook_mgr.clone().start_dispatcher(db.subscribe());
 
         tokio::spawn(async move {
             loop {
@@ -48,8 +50,9 @@ impl HttpServer {
                                 let db_clone = Arc::clone(&db);
                                 let func_clone = Arc::clone(&functions_reg);
                                 let rt_clone = Arc::clone(&realtime_mgr);
+                                let wh_clone = Arc::clone(&webhook_mgr);
                                 tokio::spawn(async move {
-                                    let _ = handle_http_connection(socket, db_clone, func_clone, rt_clone).await;
+                                    let _ = handle_http_connection(socket, db_clone, func_clone, rt_clone, wh_clone).await;
                                 });
                             }
                             Err(_) => break,
@@ -97,6 +100,7 @@ async fn handle_http_connection(
     db: Arc<SharedDatabase>,
     functions_reg: Arc<FunctionRegistry>,
     realtime_mgr: Arc<RealtimeChannelManager>,
+    webhook_mgr: Arc<crate::webhooks::WebhookManager>,
 ) -> std::io::Result<()> {
     let mut header_buf = Vec::new();
     let mut temp_chunk = [0u8; 1024];
@@ -468,6 +472,8 @@ async fn handle_http_connection(
             &exec_ctx,
         )
         .await
+    } else if path.starts_with("/v1/webhooks") || path.starts_with("/admin/webhooks") {
+        handle_webhooks_request(&webhook_mgr, &method, path, query_string, &body, &exec_ctx).await
     } else if let Some(func_name) = path.strip_prefix("/v1/rpc/") {
         handle_rpc(&db, func_name, &body, &exec_ctx).await
     } else if let Some(table_name) = path.strip_prefix("/v1/rest/") {
@@ -507,6 +513,84 @@ fn sanitize_identifier(s: &str) -> std::result::Result<String, &'static str> {
 
 fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+async fn handle_webhooks_request(
+    webhook_mgr: &crate::webhooks::WebhookManager,
+    method: &str,
+    path: &str,
+    query_string: &str,
+    body: &str,
+    exec_ctx: &crate::auth::ExecutionContext,
+) -> (u16, &'static str, serde_json::Value) {
+    if !exec_ctx.is_authenticated() {
+        return (
+            401,
+            "Unauthorized",
+            serde_json::json!({ "error": "authentication required" }),
+        );
+    }
+
+    if method == "GET" {
+        let list = webhook_mgr.list_webhooks().await;
+        (200, "OK", serde_json::json!({ "webhooks": list }))
+    } else if method == "POST" {
+        let cfg: crate::webhooks::WebhookConfig = match serde_json::from_str(body) {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": format!("invalid webhook config JSON: {e}") }),
+                );
+            }
+        };
+        webhook_mgr.add_webhook(cfg.clone()).await;
+        (
+            201,
+            "Created",
+            serde_json::json!({ "status": "created", "webhook": cfg }),
+        )
+    } else if method == "DELETE" {
+        let id = if let Some(sub) = path.strip_prefix("/v1/webhooks/") {
+            sub
+        } else if let Some(sub) = path.strip_prefix("/admin/webhooks/") {
+            sub
+        } else if !query_string.is_empty() {
+            query_string.strip_prefix("id=").unwrap_or(query_string)
+        } else {
+            ""
+        };
+
+        if id.is_empty() {
+            return (
+                400,
+                "Bad Request",
+                serde_json::json!({ "error": "missing webhook id" }),
+            );
+        }
+
+        let removed = webhook_mgr.remove_webhook(id).await;
+        if removed {
+            (
+                200,
+                "OK",
+                serde_json::json!({ "status": "deleted", "id": id }),
+            )
+        } else {
+            (
+                404,
+                "Not Found",
+                serde_json::json!({ "error": "webhook not found" }),
+            )
+        }
+    } else {
+        (
+            405,
+            "Method Not Allowed",
+            serde_json::json!({ "error": format!("method '{method}' not allowed") }),
+        )
+    }
 }
 
 async fn handle_auth_refresh(
