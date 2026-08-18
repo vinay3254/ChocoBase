@@ -1,4 +1,6 @@
 //! Realtime Broadcast and Presence Channel Engine for ChocoBase.
+//! Provides topic-based live message distribution across async subscribers,
+//! and secure, authenticated multi-user room presence state tracking.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -15,16 +17,50 @@ pub struct PresenceEntry {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BroadcastMessage {
+    pub channel: String,
+    pub event: String,
+    pub payload: serde_json::Value,
+    pub sender_id: Option<i64>,
+    pub sender_role: String,
+    pub timestamp: u64,
+}
+
 #[derive(Clone, Default)]
 pub struct RealtimeChannelManager {
     // channel_name -> (user_key -> PresenceEntry)
     presence: Arc<RwLock<HashMap<String, HashMap<String, PresenceEntry>>>>,
+    // channel_name -> broadcast sender
+    broadcast_channels:
+        Arc<RwLock<HashMap<String, tokio::sync::broadcast::Sender<BroadcastMessage>>>>,
 }
 
 impl RealtimeChannelManager {
     pub fn new() -> Self {
         Self {
             presence: Arc::new(RwLock::new(HashMap::new())),
+            broadcast_channels: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Subscribe to live broadcast messages on a specific channel topic.
+    pub fn subscribe(&self, channel: &str) -> tokio::sync::broadcast::Receiver<BroadcastMessage> {
+        let mut map = self.broadcast_channels.write().unwrap();
+        let tx = map.entry(channel.to_string()).or_insert_with(|| {
+            let (tx, _) = tokio::sync::broadcast::channel(512);
+            tx
+        });
+        tx.subscribe()
+    }
+
+    /// Publishes a message to all active subscribers on a channel. Returns number of active receivers.
+    pub fn publish(&self, msg: BroadcastMessage) -> usize {
+        let map = self.broadcast_channels.read().unwrap();
+        if let Some(tx) = map.get(&msg.channel) {
+            tx.send(msg).unwrap_or(0)
+        } else {
+            0
         }
     }
 
@@ -63,12 +99,33 @@ impl RealtimeChannelManager {
         }
     }
 
-    pub fn untrack_presence(&self, channel: &str, key: &str) -> bool {
+    pub fn untrack_presence(
+        &self,
+        channel: &str,
+        key: &str,
+        ctx: &ExecutionContext,
+    ) -> Result<bool, &'static str> {
         let mut map = self.presence.write().unwrap();
         if let Some(channel_presence) = map.get_mut(channel) {
-            channel_presence.remove(key).is_some()
+            if let Some(entry) = channel_presence.get(key) {
+                // Enforce presence key ownership
+                if !ctx.is_admin {
+                    if let (Some(owner_id), Some(caller_id)) = (entry.user_id, ctx.user_id) {
+                        if owner_id != caller_id {
+                            return Err("cannot untrack presence key owned by another user");
+                        }
+                    } else if entry.user_id.is_some() && ctx.user_id.is_none() {
+                        return Err(
+                            "authentication required to untrack authenticated presence key",
+                        );
+                    }
+                }
+                Ok(channel_presence.remove(key).is_some())
+            } else {
+                Ok(false)
+            }
         } else {
-            false
+            Ok(false)
         }
     }
 }
@@ -84,6 +141,14 @@ pub async fn handle_realtime_channel_request(
 
     if subpath.starts_with("/broadcast/") && method == "POST" {
         let channel = subpath["/broadcast/".len()..].trim_matches('/');
+        if channel.starts_with("private:") && !ctx.is_authenticated() && !ctx.is_admin {
+            return (
+                401,
+                "Unauthorized",
+                serde_json::json!({ "error": "authentication required for private broadcast channel" }),
+            );
+        }
+
         let payload: serde_json::Value =
             serde_json::from_str(body).unwrap_or_else(|_| serde_json::json!({ "raw": body }));
 
@@ -91,12 +156,24 @@ pub async fn handle_realtime_channel_request(
             .get("event")
             .and_then(|v| v.as_str())
             .unwrap_or("broadcast");
-        let event_payload = payload.get("payload").unwrap_or(&payload);
+        let event_payload = payload.get("payload").unwrap_or(&payload).clone();
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
+        let bcast_msg = BroadcastMessage {
+            channel: channel.to_string(),
+            event: event_name.to_string(),
+            payload: event_payload.clone(),
+            sender_id: ctx.user_id,
+            sender_role: ctx.role.clone().unwrap_or_else(|| "anon".into()),
+            timestamp: now,
+        };
+
+        let delivered_count = manager.publish(bcast_msg);
+
         (
             200,
             "OK",
@@ -105,6 +182,7 @@ pub async fn handle_realtime_channel_request(
                 "channel": channel,
                 "event": event_name,
                 "payload": event_payload,
+                "delivered_to": delivered_count,
                 "sender": {
                     "user_id": ctx.user_id,
                     "role": ctx.role
@@ -112,8 +190,8 @@ pub async fn handle_realtime_channel_request(
                 "timestamp": now
             }),
         )
-    } else if subpath.starts_with("/presence/") {
-        let channel = subpath["/presence/".len()..].trim_matches('/');
+    } else if let Some(stripped) = subpath.strip_prefix("/presence/") {
+        let channel = stripped.trim_matches('/');
 
         match method {
             "GET" => {
@@ -157,15 +235,18 @@ pub async fn handle_realtime_channel_request(
                             .map(|id| format!("user_{id}"))
                             .unwrap_or_else(|| "anon".into())
                     });
-                let removed = manager.untrack_presence(channel, &key);
-                (
-                    200,
-                    "OK",
-                    serde_json::json!({
-                        "status": "untracked",
-                        "removed": removed
-                    }),
-                )
+
+                match manager.untrack_presence(channel, &key, ctx) {
+                    Ok(removed) => (
+                        200,
+                        "OK",
+                        serde_json::json!({
+                            "status": "untracked",
+                            "removed": removed
+                        }),
+                    ),
+                    Err(err) => (403, "Forbidden", serde_json::json!({ "error": err })),
+                }
             }
             _ => (
                 405,
