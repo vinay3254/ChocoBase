@@ -34,13 +34,29 @@ async fn test_postgres_wire_protocol_handshake_and_query_execution() {
     stream.write_all(&startup_payload).await.unwrap();
     stream.flush().await.unwrap();
 
-    // Read AuthenticationOk ('R', len 8, code 0)
+    // 1. Read AuthenticationCleartextPassword challenge ('R', len 8, code 3)
     let mut auth_hdr = [0u8; 5];
     stream.read_exact(&mut auth_hdr).await.unwrap();
     assert_eq!(auth_hdr[0], b'R');
     let mut auth_code = [0u8; 4];
     stream.read_exact(&mut auth_code).await.unwrap();
-    assert_eq!(u32::from_be_bytes(auth_code), 0);
+    assert_eq!(u32::from_be_bytes(auth_code), 3);
+
+    // 2. Send PasswordMessage ('p', password: "postgres\0")
+    let pass_payload = b"postgres\0";
+    let pass_len = (pass_payload.len() + 4) as u32;
+    stream.write_all(b"p").await.unwrap();
+    stream.write_all(&pass_len.to_be_bytes()).await.unwrap();
+    stream.write_all(pass_payload).await.unwrap();
+    stream.flush().await.unwrap();
+
+    // 3. Read AuthenticationOk ('R', len 8, code 0)
+    let mut auth_ok_hdr = [0u8; 5];
+    stream.read_exact(&mut auth_ok_hdr).await.unwrap();
+    assert_eq!(auth_ok_hdr[0], b'R');
+    let mut auth_ok_code = [0u8; 4];
+    stream.read_exact(&mut auth_ok_code).await.unwrap();
+    assert_eq!(u32::from_be_bytes(auth_ok_code), 0);
 
     // Read ParameterStatus messages until ReadyForQuery ('Z')
     loop {
