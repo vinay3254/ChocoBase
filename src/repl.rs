@@ -9,8 +9,10 @@ use crate::types::value::Value;
 pub fn format_value(v: &Value) -> String {
     match v {
         Value::Integer(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
         Value::Text(s) | Value::Json(s) => s.clone(),
         Value::Boolean(b) => b.to_string(),
+        Value::Vector(vec) => serde_json::to_string(vec).unwrap_or_else(|_| "[]".to_string()),
         Value::Null => "NULL".to_string(),
     }
 }
