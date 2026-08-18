@@ -45,11 +45,13 @@ pub fn run(mut db: Database) {
                 let _ = rl.add_history_entry(line.as_str());
                 let trimmed = line.trim();
 
-                if buffer.is_empty() && trimmed.starts_with('.') {
+                if buffer.is_empty() && (trimmed.starts_with('.') || trimmed.starts_with("--") || trimmed.is_empty()) {
                     if trimmed == ".exit" {
                         break;
                     }
-                    println!("{}", meta::dispatch(&mut db, &trimmed[1..]));
+                    if trimmed.starts_with('.') {
+                        println!("{}", meta::dispatch(&mut db, &trimmed[1..]));
+                    }
                     continue;
                 }
 
