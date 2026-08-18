@@ -58,6 +58,27 @@ impl Parser {
             Token::Select => self.parse_select()?,
             Token::Update => self.parse_update()?,
             Token::Delete => self.parse_delete()?,
+            Token::Begin => {
+                self.advance();
+                if matches!(self.peek(), Token::Transaction) {
+                    self.advance();
+                }
+                Statement::Begin
+            }
+            Token::Commit => {
+                self.advance();
+                if matches!(self.peek(), Token::Transaction) {
+                    self.advance();
+                }
+                Statement::Commit
+            }
+            Token::Rollback => {
+                self.advance();
+                if matches!(self.peek(), Token::Transaction) {
+                    self.advance();
+                }
+                Statement::Rollback
+            }
             _ => return Err(ParseError::Syntax { offset: self.peek_offset(), message: "expected a statement".into() }),
         };
         if matches!(self.peek(), Token::Semicolon) {
