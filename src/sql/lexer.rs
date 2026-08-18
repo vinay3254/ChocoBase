@@ -382,6 +382,7 @@ fn keyword_or_identifier(text: &str) -> Token {
         "ALL" => Token::All,
         "EXPLAIN" => Token::Explain,
         "IN" => Token::In,
+        "EXISTS" => Token::Exists,
         "LIKE" => Token::Like,
         "RETURNING" => Token::Returning,
         "TRUE" => Token::True,
