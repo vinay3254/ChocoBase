@@ -1,14 +1,20 @@
 //! Supabase-Class Object Storage Engine for ChocoBase.
 //! Provides bucket and object metadata management, binary storage, public/private access controls,
-//! signed download URLs, and RLS integration.
+//! fine-grained per-user authorization, signed download URLs, and RLS integration.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+
 use crate::auth::ExecutionContext;
 use crate::engine::{ExecResult, SharedDatabase};
 use crate::types::value::Value;
+
+type HmacSha256 = Hmac<Sha256>;
 
 pub fn ensure_storage_tables(db: &SharedDatabase) {
     let buckets_sql = "CREATE TABLE _storage_buckets (id TEXT PRIMARY KEY, name TEXT NOT NULL, public BOOLEAN NOT NULL, created_at INTEGER NOT NULL)";
@@ -32,12 +38,6 @@ pub fn sanitize_object_path(path: &str) -> String {
         .join("/");
     cleaned
 }
-
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use subtle::ConstantTimeEq;
-
-type HmacSha256 = Hmac<Sha256>;
 
 pub fn sign_download_token(bucket: &str, key: &str, expires_at: u64, secret: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC can take key of any size");
@@ -66,6 +66,23 @@ pub fn verify_download_signature(
     token.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
+fn get_object_owner(db: &SharedDatabase, obj_id: &str) -> Option<Option<i64>> {
+    let esc_id = obj_id.replace('\'', "''");
+    let sql = format!("SELECT owner_id FROM _storage_objects WHERE id = '{esc_id}'");
+    if let Ok(ExecResult::Rows { rows, .. }) =
+        db.execute_with_context(&sql, &ExecutionContext::admin())
+    {
+        if let Some(r) = rows.first() {
+            return match &r[0] {
+                Value::Integer(id) => Some(Some(*id)),
+                Value::Null => Some(None),
+                _ => Some(None),
+            };
+        }
+    }
+    None
+}
+
 pub async fn handle_storage_request(
     db: &SharedDatabase,
     method: &str,
@@ -87,6 +104,33 @@ pub async fn handle_storage_request(
         if let Some((bucket_id, object_key)) = sign_path.split_once('/') {
             let bucket_id = sanitize_object_path(bucket_id);
             let object_key = sanitize_object_path(object_key);
+            let obj_id = format!("{bucket_id}/{object_key}");
+
+            // Authorization to sign URL: must be owner, admin, or in public bucket
+            let bucket_sql =
+                format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
+            let is_public_bucket =
+                match db.execute_with_context(&bucket_sql, &ExecutionContext::admin()) {
+                    Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
+                        matches!(&rows[0][0], Value::Boolean(true))
+                    }
+                    _ => false,
+                };
+
+            let owner_opt = get_object_owner(db, &obj_id);
+            let is_owner = match (owner_opt, ctx.user_id) {
+                (Some(Some(owner_id)), Some(caller_id)) => owner_id == caller_id,
+                _ => false,
+            };
+
+            if !is_public_bucket && !ctx.is_admin && !is_owner {
+                return (
+                    403,
+                    "Forbidden",
+                    serde_json::json!({ "error": "cannot generate signed URL for private object not owned by caller" }),
+                    None,
+                );
+            }
 
             let payload: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
             let expires_in = payload
@@ -211,8 +255,8 @@ pub async fn handle_storage_request(
                 None,
             ),
         }
-    } else if subpath.starts_with("/bucket/") {
-        let bucket_id = sanitize_object_path(&subpath["/bucket/".len()..]);
+    } else if let Some(stripped) = subpath.strip_prefix("/bucket/") {
+        let bucket_id = sanitize_object_path(stripped);
         match method {
             "GET" => {
                 let sql = format!("SELECT id, name, public, created_at FROM _storage_buckets WHERE id = '{bucket_id}'");
@@ -258,14 +302,56 @@ pub async fn handle_storage_request(
                 None,
             ),
         }
-    } else if subpath.starts_with("/object/") {
-        let obj_subpath = &subpath["/object/".len()..];
-        let is_public_req = obj_subpath.starts_with("public/");
-        let clean_subpath = if is_public_req {
-            &obj_subpath["public/".len()..]
+    } else if let Some(stripped) = subpath.strip_prefix("/object/list/") {
+        let bucket_id = sanitize_object_path(stripped);
+
+        let bucket_sql = format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
+        let is_public_bucket =
+            match db.execute_with_context(&bucket_sql, &ExecutionContext::admin()) {
+                Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
+                    matches!(&rows[0][0], Value::Boolean(true))
+                }
+                _ => false,
+            };
+
+        if !is_public_bucket && !ctx.is_authenticated() && !ctx.is_admin {
+            return (
+                401,
+                "Unauthorized",
+                serde_json::json!({ "error": "access denied to private bucket" }),
+                None,
+            );
+        }
+
+        let sql = if ctx.is_admin || is_public_bucket {
+            format!("SELECT id, name, owner_id, size_bytes, created_at FROM _storage_objects WHERE bucket_id = '{bucket_id}'")
         } else {
-            obj_subpath
+            let caller_id = ctx.user_id.unwrap_or(0);
+            format!("SELECT id, name, owner_id, size_bytes, created_at FROM _storage_objects WHERE bucket_id = '{bucket_id}' AND owner_id = {caller_id}")
         };
+
+        match db.execute_with_context(&sql, &ExecutionContext::admin()) {
+            Ok(ExecResult::Rows { rows, .. }) => {
+                let list: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "name": match &r[1] { Value::Text(s) => s, _ => "" },
+                            "id": match &r[0] { Value::Text(s) => s, _ => "" },
+                            "owner_id": match &r[2] { Value::Integer(i) => serde_json::Value::Number((*i).into()), _ => serde_json::Value::Null },
+                            "metadata": {
+                                "size": match &r[3] { Value::Integer(i) => *i, _ => 0 }
+                            },
+                            "created_at": match &r[4] { Value::Integer(i) => *i, _ => 0 },
+                        })
+                    })
+                    .collect();
+                (200, "OK", serde_json::Value::Array(list), None)
+            }
+            _ => (200, "OK", serde_json::json!([]), None),
+        }
+    } else if let Some(obj_subpath) = subpath.strip_prefix("/object/") {
+        let clean_subpath = obj_subpath.strip_prefix("public/").unwrap_or(obj_subpath);
 
         if let Some((bucket_id, object_key)) = clean_subpath.split_once('/') {
             let bucket_id = sanitize_object_path(bucket_id);
@@ -301,7 +387,7 @@ pub async fn handle_storage_request(
                             false
                         };
 
-                    // Check if bucket is public or user has access
+                    // Check if bucket is public
                     let bucket_sql =
                         format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
                     let is_public_bucket =
@@ -312,17 +398,28 @@ pub async fn handle_storage_request(
                             _ => false,
                         };
 
-                    if !is_public_bucket
-                        && !ctx.is_authenticated()
-                        && !ctx.is_admin
-                        && !is_valid_signed_request
-                    {
-                        return (
-                            401,
-                            "Unauthorized",
-                            serde_json::json!({ "error": "access denied to private object" }),
-                            None,
-                        );
+                    let owner_opt = get_object_owner(db, &obj_id);
+                    let is_owner = match (owner_opt, ctx.user_id) {
+                        (Some(Some(owner_id)), Some(caller_id)) => owner_id == caller_id,
+                        _ => false,
+                    };
+
+                    if !is_public_bucket && !ctx.is_admin && !is_valid_signed_request && !is_owner {
+                        if !ctx.is_authenticated() {
+                            return (
+                                401,
+                                "Unauthorized",
+                                serde_json::json!({ "error": "access denied to private object" }),
+                                None,
+                            );
+                        } else {
+                            return (
+                                403,
+                                "Forbidden",
+                                serde_json::json!({ "error": "access denied to private object owned by another user" }),
+                                None,
+                            );
+                        }
                     }
 
                     let file_path = get_storage_root().join(&bucket_id).join(&object_key);
@@ -356,7 +453,39 @@ pub async fn handle_storage_request(
                     )
                 }
                 "POST" => {
-                    // Upload object
+                    // Check bucket existence and privacy
+                    let bucket_sql =
+                        format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
+                    let is_public_bucket =
+                        match db.execute_with_context(&bucket_sql, &ExecutionContext::admin()) {
+                            Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
+                                matches!(&rows[0][0], Value::Boolean(true))
+                            }
+                            _ => false,
+                        };
+
+                    if !is_public_bucket && !ctx.is_authenticated() && !ctx.is_admin {
+                        return (
+                            401,
+                            "Unauthorized",
+                            serde_json::json!({ "error": "authentication required to upload to private bucket" }),
+                            None,
+                        );
+                    }
+
+                    // If object already exists, check ownership
+                    let owner_opt = get_object_owner(db, &obj_id);
+                    if let Some(Some(existing_owner)) = owner_opt {
+                        if !ctx.is_admin && ctx.user_id != Some(existing_owner) {
+                            return (
+                                403,
+                                "Forbidden",
+                                serde_json::json!({ "error": "cannot overwrite object owned by another user" }),
+                                None,
+                            );
+                        }
+                    }
+
                     let file_path = get_storage_root().join(&bucket_id).join(&object_key);
                     if let Some(parent) = file_path.parent() {
                         let _ = fs::create_dir_all(parent);
@@ -388,7 +517,7 @@ pub async fn handle_storage_request(
                     let insert_sql = format!(
                         "INSERT INTO _storage_objects (id, bucket_id, name, owner_id, content_type, size_bytes, metadata, created_at, updated_at) VALUES ('{esc_obj_id}', '{esc_bucket_id}', '{esc_obj_key}', {owner_id}, 'application/octet-stream', {size_bytes}, '{{}}', {now}, {now})"
                     );
-                    let _ = db.execute_with_context(&insert_sql, ctx);
+                    let _ = db.execute_with_context(&insert_sql, &ExecutionContext::admin());
 
                     (
                         200,
@@ -402,11 +531,37 @@ pub async fn handle_storage_request(
                     )
                 }
                 "DELETE" => {
+                    let bucket_sql =
+                        format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
+                    let is_public_bucket =
+                        match db.execute_with_context(&bucket_sql, &ExecutionContext::admin()) {
+                            Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
+                                matches!(&rows[0][0], Value::Boolean(true))
+                            }
+                            _ => false,
+                        };
+
+                    let owner_opt = get_object_owner(db, &obj_id);
+                    let is_owner = match (owner_opt, ctx.user_id) {
+                        (Some(Some(owner_id)), Some(caller_id)) => owner_id == caller_id,
+                        (Some(None), _) if is_public_bucket => true,
+                        _ => false,
+                    };
+
+                    if !ctx.is_admin && !is_owner {
+                        return (
+                            403,
+                            "Forbidden",
+                            serde_json::json!({ "error": "cannot delete object owned by another user" }),
+                            None,
+                        );
+                    }
+
                     let file_path = get_storage_root().join(&bucket_id).join(&object_key);
                     let _ = fs::remove_file(file_path);
                     let esc_obj_id = obj_id.replace('\'', "''");
                     let sql = format!("DELETE FROM _storage_objects WHERE id = '{esc_obj_id}'");
-                    let _ = db.execute_with_context(&sql, ctx);
+                    let _ = db.execute_with_context(&sql, &ExecutionContext::admin());
                     (
                         200,
                         "OK",
