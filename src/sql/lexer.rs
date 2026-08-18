@@ -354,6 +354,7 @@ fn keyword_or_identifier(text: &str) -> Token {
         "EXPLAIN" => Token::Explain,
         "IN" => Token::In,
         "LIKE" => Token::Like,
+        "RETURNING" => Token::Returning,
         "TRUE" => Token::True,
         "FALSE" => Token::False,
         _ => Token::Identifier(text.to_string()),
