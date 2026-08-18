@@ -137,3 +137,100 @@ fn group_by_aggregations() {
         other => panic!("unexpected result: {other:?}"),
     }
 }
+
+#[test]
+fn join_with_group_by_and_aggregation() {
+    let file = NamedTempFile::new().unwrap();
+    let mut db = Database::create(file.path()).unwrap();
+
+    db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
+    db.execute("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')").unwrap();
+
+    db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, amount INTEGER NOT NULL)").unwrap();
+    db.execute("INSERT INTO orders (id, user_id, amount) VALUES (1, 1, 250), (2, 1, 150), (3, 2, 400)").unwrap();
+
+    let res = db.execute("SELECT users.name, SUM(orders.amount) AS total_spent FROM users INNER JOIN orders ON users.id = orders.user_id GROUP BY users.name").unwrap();
+    match res {
+        ExecResult::Rows { columns, rows } => {
+            assert_eq!(columns, vec!["users.name", "total_spent"]);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0], vec![Value::Text("Alice".into()), Value::Integer(400)]);
+            assert_eq!(rows[1], vec![Value::Text("Bob".into()), Value::Integer(400)]);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn in_and_not_in_expressions() {
+    let file = NamedTempFile::new().unwrap();
+    let mut db = Database::create(file.path()).unwrap();
+
+    db.execute("CREATE TABLE products (id INTEGER PRIMARY KEY, category TEXT, price INTEGER)").unwrap();
+    db.execute("INSERT INTO products (id, category, price) VALUES (1, 'electronics', 100), (2, 'books', 20), (3, 'clothing', 50), (4, 'food', 10)").unwrap();
+
+    let res = db.execute("SELECT id FROM products WHERE category IN ('electronics', 'books') ORDER BY id").unwrap();
+    match res {
+        ExecResult::Rows { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let res_not = db.execute("SELECT id FROM products WHERE category NOT IN ('electronics', 'books') ORDER BY id").unwrap();
+    match res_not {
+        ExecResult::Rows { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Integer(3)], vec![Value::Integer(4)]]);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn like_and_not_like_patterns() {
+    let file = NamedTempFile::new().unwrap();
+    let mut db = Database::create(file.path()).unwrap();
+
+    db.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, email TEXT)").unwrap();
+    db.execute("INSERT INTO customers (id, email) VALUES (1, 'alice@example.com'), (2, 'bob@gmail.com'), (3, 'charlie@example.org')").unwrap();
+
+    let res = db.execute("SELECT id FROM customers WHERE email LIKE '%@example.com'").unwrap();
+    match res {
+        ExecResult::Rows { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Integer(1)]]);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    let res_not = db.execute("SELECT id FROM customers WHERE email NOT LIKE '%@example%' ORDER BY id").unwrap();
+    match res_not {
+        ExecResult::Rows { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Integer(2)]]);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn explain_query_plans() {
+    let file = NamedTempFile::new().unwrap();
+    let mut db = Database::create(file.path()).unwrap();
+
+    db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
+    db.execute("CREATE INDEX idx_users_name ON users(name)").unwrap();
+
+    let res = db.execute("EXPLAIN SELECT * FROM users WHERE id = 10").unwrap();
+    match res {
+        ExecResult::Rows { columns, rows } => {
+            assert_eq!(columns, vec!["QUERY PLAN".to_string()]);
+            assert!(!rows.is_empty());
+            let text = match &rows[0][0] {
+                Value::Text(t) => t,
+                _ => "",
+            };
+            assert!(text.contains("TableSeek") || text.contains("SeqScan"), "got text: {text}");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
