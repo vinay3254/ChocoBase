@@ -33,11 +33,44 @@ pub fn sanitize_object_path(path: &str) -> String {
     cleaned
 }
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+
+type HmacSha256 = Hmac<Sha256>;
+
+pub fn sign_download_token(bucket: &str, key: &str, expires_at: u64, secret: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC can take key of any size");
+    let payload = format!("{bucket}:{key}:{expires_at}");
+    mac.update(payload.as_bytes());
+    let result = mac.finalize().into_bytes();
+    result.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn verify_download_signature(
+    bucket: &str,
+    key: &str,
+    expires_at: u64,
+    token: &str,
+    secret: &[u8],
+) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if expires_at <= now {
+        return false;
+    }
+
+    let expected = sign_download_token(bucket, key, expires_at, secret);
+    token.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
 pub async fn handle_storage_request(
     db: &SharedDatabase,
     method: &str,
     path: &str,
-    _query_str: &str,
+    query_str: &str,
     body: &str,
     ctx: &ExecutionContext,
 ) -> (
@@ -48,6 +81,43 @@ pub async fn handle_storage_request(
 ) {
     ensure_storage_tables(db);
     let subpath = path.strip_prefix("/v1/storage/v1").unwrap_or(path);
+
+    if subpath.starts_with("/object/sign/") && method == "POST" {
+        let sign_path = &subpath["/object/sign/".len()..];
+        if let Some((bucket_id, object_key)) = sign_path.split_once('/') {
+            let bucket_id = sanitize_object_path(bucket_id);
+            let object_key = sanitize_object_path(object_key);
+
+            let payload: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            let expires_in = payload
+                .get("expiresIn")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3600);
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let expires_at = now + expires_in;
+
+            let secret = crate::auth::jwt_secret();
+            let token = sign_download_token(&bucket_id, &object_key, expires_at, &secret);
+            let signed_url = format!(
+                "/v1/storage/v1/object/{bucket_id}/{object_key}?token={token}&expires={expires_at}"
+            );
+
+            return (
+                200,
+                "OK",
+                serde_json::json!({
+                    "signedURL": signed_url,
+                    "token": token,
+                    "expiresAt": expires_at
+                }),
+                None,
+            );
+        }
+    }
 
     if subpath == "/bucket" || subpath == "/bucket/" {
         match method {
@@ -204,6 +274,33 @@ pub async fn handle_storage_request(
 
             match method {
                 "GET" => {
+                    // Check query params for signed token
+                    let mut token_opt = None;
+                    let mut expires_opt = None;
+                    for pair in query_str.split('&') {
+                        if let Some((k, v)) = pair.split_once('=') {
+                            if k == "token" {
+                                token_opt = Some(v);
+                            } else if k == "expires" {
+                                expires_opt = v.parse::<u64>().ok();
+                            }
+                        }
+                    }
+
+                    let is_valid_signed_request =
+                        if let (Some(token), Some(expires_at)) = (token_opt, expires_opt) {
+                            let secret = crate::auth::jwt_secret();
+                            verify_download_signature(
+                                &bucket_id,
+                                &object_key,
+                                expires_at,
+                                token,
+                                &secret,
+                            )
+                        } else {
+                            false
+                        };
+
                     // Check if bucket is public or user has access
                     let bucket_sql =
                         format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
@@ -215,7 +312,11 @@ pub async fn handle_storage_request(
                             _ => false,
                         };
 
-                    if !is_public_bucket && !ctx.is_authenticated() && !ctx.is_admin {
+                    if !is_public_bucket
+                        && !ctx.is_authenticated()
+                        && !ctx.is_admin
+                        && !is_valid_signed_request
+                    {
                         return (
                             401,
                             "Unauthorized",
