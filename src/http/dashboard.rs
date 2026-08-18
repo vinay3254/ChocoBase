@@ -1,34 +1,34 @@
-//! Embedded Admin Web Dashboard for ChocoBase.
+//! Embedded Admin Web Studio for ChocoBase.
 
 pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ChocoBase Studio & Dashboard</title>
+    <title>ChocoBase Studio</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-base: #0c0e14;
-            --bg-surface: #141721;
-            --bg-elevated: #1a1e2b;
-            --bg-active: #23283a;
-            --border-subtle: #252a3d;
-            --border-strong: #323850;
-            --text-main: #f0f2f8;
-            --text-muted: #8b92aa;
-            --primary: #6366f1;
-            --primary-hover: #4f46e5;
+            --bg-base: #090a0f;
+            --bg-surface: #11141d;
+            --bg-elevated: #181d2a;
+            --bg-active: #22293b;
+            --border-subtle: #1e2436;
+            --border-strong: #2c354f;
+            --text-main: #f3f5f9;
+            --text-muted: #848da6;
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
             --accent-green: #10b981;
             --accent-amber: #f59e0b;
             --accent-rose: #f43f5e;
             --accent-cyan: #06b6d4;
             --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
             --font-mono: 'JetBrains Mono', monospace;
-            --radius-md: 10px;
-            --radius-lg: 14px;
+            --radius-md: 8px;
+            --radius-lg: 12px;
         }
 
         * {
@@ -47,11 +47,10 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             overflow: hidden;
         }
 
-        /* Top Header */
         header {
             background-color: var(--bg-surface);
             border-bottom: 1px solid var(--border-subtle);
-            padding: 0.75rem 1.5rem;
+            padding: 0.65rem 1.25rem;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -61,52 +60,54 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
         .brand {
             display: flex;
             align-items: center;
-            gap: 0.75rem;
-            font-size: 1.15rem;
+            gap: 0.6rem;
+            font-size: 1.1rem;
             font-weight: 800;
-            letter-spacing: -0.02em;
         }
 
         .brand-badge {
             background: linear-gradient(135deg, var(--primary), var(--accent-cyan));
             color: white;
-            padding: 0.25rem 0.6rem;
-            border-radius: 6px;
-            font-size: 0.75rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
             font-weight: 700;
             text-transform: uppercase;
+        }
+
+        .header-meta {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
         }
 
         .status-pill {
             display: flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 0.4rem;
             background: var(--bg-elevated);
             border: 1px solid var(--border-subtle);
-            padding: 0.35rem 0.85rem;
+            padding: 0.3rem 0.75rem;
             border-radius: 9999px;
-            font-size: 0.8rem;
-            font-weight: 500;
+            font-size: 0.78rem;
             color: var(--text-muted);
         }
 
         .status-dot {
-            width: 8px;
-            height: 8px;
+            width: 7px;
+            height: 7px;
             border-radius: 50%;
             background-color: var(--accent-green);
-            box-shadow: 0 0 10px var(--accent-green);
+            box-shadow: 0 0 8px var(--accent-green);
         }
 
-        /* Main Workspace Layout */
         .workspace {
             display: grid;
-            grid-template-columns: 280px 1fr;
+            grid-template-columns: 240px 1fr;
             flex: 1;
             overflow: hidden;
         }
 
-        /* Left Sidebar: Schema Browser & Navigation */
         aside {
             background-color: var(--bg-surface);
             border-right: 1px solid var(--border-subtle);
@@ -115,53 +116,43 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             overflow-y: auto;
         }
 
-        .sidebar-section {
-            padding: 1.25rem 1rem 0.5rem;
+        .nav-group {
+            padding: 1rem 0.75rem 0.5rem;
         }
 
-        .section-title {
-            font-size: 0.75rem;
+        .nav-title {
+            font-size: 0.7rem;
             font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.06em;
             color: var(--text-muted);
-            margin-bottom: 0.75rem;
+            margin-bottom: 0.5rem;
             padding-left: 0.5rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
         }
 
-        .table-list {
-            list-style: none;
-            display: flex;
-            flex-direction: column;
-            gap: 0.25rem;
-        }
-
-        .table-item {
-            padding: 0.6rem 0.75rem;
+        .nav-item {
+            padding: 0.55rem 0.75rem;
             border-radius: var(--radius-md);
-            font-size: 0.875rem;
+            font-size: 0.85rem;
             font-weight: 600;
             cursor: pointer;
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            gap: 0.6rem;
             color: var(--text-muted);
             transition: all 0.15s ease;
+            margin-bottom: 0.2rem;
         }
 
-        .table-item:hover, .table-item.active {
+        .nav-item:hover, .nav-item.active {
             background-color: var(--bg-elevated);
             color: var(--text-main);
         }
 
-        .table-item.active {
+        .nav-item.active {
             border-left: 3px solid var(--primary);
         }
 
-        /* Center Content Area */
         main {
             display: flex;
             flex-direction: column;
@@ -169,14 +160,24 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             background-color: var(--bg-base);
         }
 
-        /* SQL Editor Panel */
+        .view-section {
+            display: none;
+            flex: 1;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .view-section.active {
+            display: flex;
+        }
+
         .editor-container {
-            padding: 1.25rem 1.5rem 0.75rem;
+            padding: 1rem 1.25rem 0.75rem;
             background: var(--bg-surface);
             border-bottom: 1px solid var(--border-subtle);
             display: flex;
             flex-direction: column;
-            gap: 0.75rem;
+            gap: 0.6rem;
         }
 
         .editor-header {
@@ -186,7 +187,7 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
         }
 
         .editor-title {
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             font-weight: 700;
         }
 
@@ -197,10 +198,10 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 
         button {
             font-family: var(--font-sans);
-            font-size: 0.85rem;
+            font-size: 0.82rem;
             font-weight: 600;
-            padding: 0.5rem 1.1rem;
-            border-radius: 8px;
+            padding: 0.45rem 0.9rem;
+            border-radius: 6px;
             border: none;
             cursor: pointer;
             transition: all 0.15s ease;
@@ -228,66 +229,33 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             background-color: var(--bg-active);
         }
 
-        textarea {
-            width: 100%;
-            height: 110px;
+        textarea, input, select {
             background-color: var(--bg-base);
             border: 1px solid var(--border-strong);
             border-radius: var(--radius-md);
             color: var(--text-main);
             font-family: var(--font-mono);
-            font-size: 0.9rem;
-            line-height: 1.5;
-            padding: 0.75rem 1rem;
-            resize: vertical;
+            font-size: 0.85rem;
+            padding: 0.6rem 0.85rem;
             outline: none;
-            transition: border-color 0.15s ease;
         }
 
-        textarea:focus {
+        textarea:focus, input:focus, select:focus {
             border-color: var(--primary);
         }
 
-        /* Results & Tabs Panel */
+        textarea {
+            width: 100%;
+            height: 95px;
+            resize: vertical;
+        }
+
         .results-panel {
             flex: 1;
             display: flex;
             flex-direction: column;
-            padding: 1.25rem 1.5rem;
+            padding: 1rem 1.25rem;
             overflow: hidden;
-        }
-
-        .tabs {
-            display: flex;
-            gap: 1.5rem;
-            border-bottom: 1px solid var(--border-subtle);
-            margin-bottom: 1rem;
-        }
-
-        .tab-btn {
-            background: none;
-            border: none;
-            padding: 0.5rem 0;
-            color: var(--text-muted);
-            font-weight: 600;
-            font-size: 0.9rem;
-            cursor: pointer;
-            position: relative;
-            border-radius: 0;
-        }
-
-        .tab-btn.active {
-            color: var(--text-main);
-        }
-
-        .tab-btn.active::after {
-            content: '';
-            position: absolute;
-            bottom: -1px;
-            left: 0;
-            right: 0;
-            height: 2px;
-            background-color: var(--primary);
         }
 
         .tab-content {
@@ -296,14 +264,12 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             border-radius: var(--radius-md);
             background: var(--bg-surface);
             border: 1px solid var(--border-subtle);
-            position: relative;
         }
 
-        /* Data Grid Table */
         table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 0.85rem;
+            font-size: 0.82rem;
             text-align: left;
         }
 
@@ -312,9 +278,8 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             color: var(--text-muted);
             font-weight: 700;
             text-transform: uppercase;
-            font-size: 0.75rem;
-            letter-spacing: 0.05em;
-            padding: 0.75rem 1rem;
+            font-size: 0.72rem;
+            padding: 0.65rem 0.9rem;
             border-bottom: 1px solid var(--border-subtle);
             position: sticky;
             top: 0;
@@ -322,7 +287,7 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
         }
 
         td {
-            padding: 0.75rem 1rem;
+            padding: 0.65rem 0.9rem;
             border-bottom: 1px solid var(--border-subtle);
             color: var(--text-main);
             font-family: var(--font-mono);
@@ -339,15 +304,16 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             justify-content: center;
             height: 100%;
             color: var(--text-muted);
-            font-size: 0.9rem;
-            gap: 0.5rem;
+            font-size: 0.85rem;
+            gap: 0.4rem;
+            padding: 2rem;
         }
 
         .banner-alert {
-            padding: 0.75rem 1rem;
-            border-radius: 8px;
-            margin-bottom: 0.75rem;
-            font-size: 0.85rem;
+            padding: 0.6rem 0.85rem;
+            border-radius: 6px;
+            margin-bottom: 0.5rem;
+            font-size: 0.8rem;
             font-weight: 500;
             display: none;
         }
@@ -363,34 +329,52 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             border: 1px solid var(--accent-green);
             color: #a7f3d0;
         }
+
+        .feed-container {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            padding: 0.75rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        .feed-item {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+        }
     </style>
 </head>
 <body>
     <header>
         <div class="brand">
             <span>⚡ ChocoBase Studio</span>
-            <span class="brand-badge">v0.1.0</span>
+            <span class="brand-badge">Engine v0.1.0</span>
         </div>
-        <div class="status-pill">
-            <div class="status-dot"></div>
-            <span id="server-status">Connecting...</span>
+        <div class="header-meta">
+            <div class="status-pill">
+                <div class="status-dot"></div>
+                <span id="server-status">Connecting...</span>
+            </div>
         </div>
     </header>
 
     <div class="workspace">
         <aside>
-            <div class="sidebar-section">
-                <div class="section-title">
-                    <span>Tables & Schema</span>
-                    <button class="btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.7rem;" onclick="loadTables()">Refresh</button>
-                </div>
-                <ul class="table-list" id="table-list">
-                    <li class="empty-state" style="padding: 1rem 0;">Loading tables...</li>
-                </ul>
+            <div class="nav-group">
+                <div class="nav-title">Studio Workspaces</div>
+                <div class="nav-item active" onclick="switchView('sql')">💻 SQL & Tables</div>
+                <div class="nav-item" onclick="switchView('storage')">📦 Storage Explorer</div>
+                <div class="nav-item" onclick="switchView('auth')">🔐 Auth & Users</div>
+                <div class="nav-item" onclick="switchView('functions')">⚡ Functions</div>
+                <div class="nav-item" onclick="switchView('realtime')">📡 Live Realtime</div>
             </div>
-            <div class="sidebar-section" style="margin-top: auto; border-top: 1px solid var(--border-subtle); padding-top: 1rem;">
-                <div class="section-title">Engine Metrics</div>
-                <div id="metrics-view" style="font-size: 0.8rem; color: var(--text-muted); font-family: var(--font-mono); line-height: 1.6;">
+
+            <div class="nav-group" style="margin-top: auto; border-top: 1px solid var(--border-subtle);">
+                <div class="nav-title">Database Stats</div>
+                <div id="metrics-view" style="font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono); line-height: 1.5; padding: 0.25rem 0.5rem;">
                     Page Count: --<br>
                     Pages Read: --<br>
                     Cached Pages: --
@@ -399,24 +383,90 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
         </aside>
 
         <main>
-            <div class="editor-container">
-                <div class="editor-header">
-                    <span class="editor-title">SQL Query Console</span>
-                    <div class="btn-group">
-                        <button class="btn-secondary" onclick="clearQuery()">Clear</button>
-                        <button class="btn-primary" onclick="runQuery()">▶ Execute (Ctrl+Enter)</button>
+            <!-- SQL & Tables Workspace -->
+            <div id="view-sql" class="view-section active">
+                <div class="editor-container">
+                    <div class="editor-header">
+                        <span class="editor-title">SQL Query Runner</span>
+                        <div class="btn-group">
+                            <button class="btn-secondary" onclick="clearQuery()">Clear</button>
+                            <button class="btn-primary" onclick="runQuery()">▶ Execute (Ctrl+Enter)</button>
+                        </div>
+                    </div>
+                    <textarea id="sql-input" placeholder="SELECT * FROM users;" spellcheck="false"></textarea>
+                    <div id="alert-box" class="banner-alert"></div>
+                </div>
+
+                <div class="results-panel">
+                    <div class="tab-content" id="results-content">
+                        <div class="empty-state">Execute a query or click a table to view data</div>
                     </div>
                 </div>
-                <textarea id="sql-input" placeholder="SELECT * FROM users;" spellcheck="false"></textarea>
-                <div id="alert-box" class="banner-alert"></div>
             </div>
 
-            <div class="results-panel">
-                <div class="tabs">
-                    <button class="tab-btn active" id="tab-results-btn">Query Results</button>
+            <!-- Storage Explorer Workspace -->
+            <div id="view-storage" class="view-section">
+                <div class="editor-container">
+                    <div class="editor-header">
+                        <span class="editor-title">S3-Compatible Object Storage</span>
+                        <button class="btn-primary" onclick="loadStorageBuckets()">↻ Refresh Buckets</button>
+                    </div>
                 </div>
-                <div class="tab-content" id="results-content">
-                    <div class="empty-state">Run a query to view results</div>
+                <div class="results-panel">
+                    <div class="tab-content" id="storage-content">
+                        <div class="empty-state">Loading storage buckets...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Auth & Users Workspace -->
+            <div id="view-auth" class="view-section">
+                <div class="editor-container">
+                    <div class="editor-header">
+                        <span class="editor-title">Identity & User Management</span>
+                        <button class="btn-primary" onclick="loadAuthUsers()">↻ Refresh Users</button>
+                    </div>
+                </div>
+                <div class="results-panel">
+                    <div class="tab-content" id="auth-content">
+                        <div class="empty-state">Loading users...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Serverless Functions Workspace -->
+            <div id="view-functions" class="view-section">
+                <div class="editor-container">
+                    <div class="editor-header">
+                        <span class="editor-title">Serverless Edge Functions</span>
+                        <button class="btn-primary" onclick="loadFunctions()">↻ Refresh Registry</button>
+                    </div>
+                </div>
+                <div class="results-panel">
+                    <div class="tab-content" id="functions-content">
+                        <div class="empty-state">Loading serverless functions...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Realtime Inspector Workspace -->
+            <div id="view-realtime" class="view-section">
+                <div class="editor-container">
+                    <div class="editor-header">
+                        <span class="editor-title">Live Realtime SSE Stream & Changefeed</span>
+                        <div class="btn-group">
+                            <input id="realtime-channel" value="general" style="width: 140px;" placeholder="Channel topic">
+                            <button class="btn-primary" id="sse-toggle-btn" onclick="toggleRealtimeStream()">⚡ Connect SSE</button>
+                            <button class="btn-secondary" onclick="clearRealtimeLogs()">Clear Logs</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="results-panel">
+                    <div class="tab-content" id="realtime-content">
+                        <div id="realtime-logs" class="feed-container">
+                            <div class="empty-state">Click Connect SSE to subscribe to live broadcast and database change events.</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </main>
@@ -425,10 +475,24 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
     <script>
         const sqlInput = document.getElementById('sql-input');
         const alertBox = document.getElementById('alert-box');
-        const tableList = document.getElementById('table-list');
         const resultsContent = document.getElementById('results-content');
         const serverStatus = document.getElementById('server-status');
         const metricsView = document.getElementById('metrics-view');
+        let currentView = 'sql';
+        let sseSource = null;
+
+        function switchView(viewName) {
+            currentView = viewName;
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
+
+            const targetSection = document.getElementById(`view-${viewName}`);
+            if (targetSection) targetSection.classList.add('active');
+
+            if (viewName === 'storage') loadStorageBuckets();
+            else if (viewName === 'auth') loadAuthUsers();
+            else if (viewName === 'functions') loadFunctions();
+        }
 
         sqlInput.addEventListener('keydown', (e) => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -441,7 +505,7 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                 const res = await fetch('/v1/health');
                 const data = await res.json();
                 if (data.status === 'healthy') {
-                    serverStatus.innerText = 'Connected: ' + data.engine;
+                    serverStatus.innerText = 'Online: ' + data.engine;
                 }
             } catch (err) {
                 serverStatus.innerText = 'Disconnected';
@@ -454,30 +518,6 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                 const stats = await res.json();
                 metricsView.innerHTML = `Page Count: ${stats.page_count}<br>Pages Read: ${stats.pages_read}<br>Cached Pages: ${stats.cached_pages}`;
             } catch (e) {}
-        }
-
-        async function loadTables() {
-            try {
-                const res = await fetch('/v1/tables');
-                const data = await res.json();
-                tableList.innerHTML = '';
-                if (data.tables.length === 0) {
-                    tableList.innerHTML = '<li class="empty-state" style="padding: 1rem 0;">No tables found</li>';
-                    return;
-                }
-                data.tables.forEach(table => {
-                    const li = document.createElement('li');
-                    li.className = 'table-item';
-                    li.innerHTML = `<span>🗄️ ${table}</span>`;
-                    li.onclick = () => {
-                        sqlInput.value = `SELECT * FROM ${table} LIMIT 50;`;
-                        runQuery();
-                    };
-                    tableList.appendChild(li);
-                });
-            } catch (err) {
-                tableList.innerHTML = '<li class="empty-state">Failed to load tables</li>';
-            }
         }
 
         function clearQuery() {
@@ -514,7 +554,6 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                 alertBox.style.display = 'block';
 
                 renderResult(data.result);
-                loadTables();
                 loadMetrics();
             } catch (err) {
                 alertBox.className = 'banner-alert banner-error';
@@ -525,7 +564,7 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 
         function renderResult(result) {
             if (result === 'Ok') {
-                resultsContent.innerHTML = '<div class="empty-state">Query executed successfully (OK)</div>';
+                resultsContent.innerHTML = '<div class="empty-state">Statement executed successfully (OK)</div>';
             } else if (result && result.Modified !== undefined) {
                 resultsContent.innerHTML = `<div class="empty-state">${result.Modified} row(s) modified</div>`;
             } else if (result && result.Rows) {
@@ -542,7 +581,7 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
                 rows.forEach(row => {
                     html += '<tr>';
                     row.forEach(val => {
-                        let text = val === null ? 'NULL' : typeof val === 'object' ? JSON.stringify(val) : val;
+                        let text = val === null ? '<span style="color: var(--accent-amber)">NULL</span>' : typeof val === 'object' ? JSON.stringify(val) : val;
                         html += `<td>${text}</td>`;
                     });
                     html += '</tr>';
@@ -552,8 +591,108 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
             }
         }
 
+        async function loadStorageBuckets() {
+            const container = document.getElementById('storage-content');
+            container.innerHTML = '<div class="empty-state">Loading buckets...</div>';
+            try {
+                const res = await fetch('/v1/storage/bucket');
+                const buckets = await res.json();
+                if (!Array.isArray(buckets) || buckets.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No storage buckets created. Create one via API or SQL.</div>';
+                    return;
+                }
+                let html = '<table><thead><tr><th>Bucket Name</th><th>Public</th><th>Created At</th></tr></thead><tbody>';
+                buckets.forEach(b => {
+                    html += `<tr><td><strong>📁 ${b.name}</strong></td><td>${b.public ? '✅ Public' : '🔒 Private'}</td><td>${new Date(b.created_at * 1000).toLocaleString()}</td></tr>`;
+                });
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div class="empty-state">Failed to load storage: ${e.message}</div>`;
+            }
+        }
+
+        async function loadAuthUsers() {
+            const container = document.getElementById('auth-content');
+            container.innerHTML = '<div class="empty-state">Loading users...</div>';
+            try {
+                const res = await fetch('/v1/sql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sql: "SELECT id, username, role FROM _users LIMIT 100;" })
+                });
+                const data = await res.json();
+                if (data.result && data.result.Rows) {
+                    const { columns, rows } = data.result.Rows;
+                    let html = '<table><thead><tr><th>ID</th><th>Username</th><th>Role</th></tr></thead><tbody>';
+                    rows.forEach(r => {
+                        html += `<tr><td>${r[0]}</td><td>👤 ${r[1]}</td><td><span class="brand-badge">${r[2]}</span></td></tr>`;
+                    });
+                    html += '</tbody></table>';
+                    container.innerHTML = html;
+                } else {
+                    container.innerHTML = '<div class="empty-state">No users registered yet.</div>';
+                }
+            } catch (e) {
+                container.innerHTML = `<div class="empty-state">Failed to load users: ${e.message}</div>`;
+            }
+        }
+
+        async function loadFunctions() {
+            const container = document.getElementById('functions-content');
+            container.innerHTML = '<div class="empty-state">Active runtime: Subprocess isolated runner with timeout guard.</div>';
+        }
+
+        function toggleRealtimeStream() {
+            const btn = document.getElementById('sse-toggle-btn');
+            const logs = document.getElementById('realtime-logs');
+            const channel = document.getElementById('realtime-channel').value.trim() || 'general';
+
+            if (sseSource) {
+                sseSource.close();
+                sseSource = null;
+                btn.innerText = '⚡ Connect SSE';
+                btn.className = 'btn-primary';
+                appendRealtimeLog('Disconnected from SSE stream.');
+                return;
+            }
+
+            logs.innerHTML = '';
+            appendRealtimeLog(`Connecting to SSE stream on channel '${channel}'...`);
+            sseSource = new EventSource(`/v1/realtime/v1/stream?channel=${encodeURIComponent(channel)}`);
+
+            sseSource.addEventListener('connected', (e) => {
+                appendRealtimeLog(`[CONNECTED] ${e.data}`);
+                btn.innerText = '⏹ Disconnect';
+                btn.className = 'btn-secondary';
+            });
+
+            sseSource.addEventListener('broadcast', (e) => {
+                appendRealtimeLog(`[BROADCAST] ${e.data}`);
+            });
+
+            sseSource.addEventListener('change', (e) => {
+                appendRealtimeLog(`[DB CHANGE] ${e.data}`);
+            });
+
+            sseSource.onerror = () => {
+                appendRealtimeLog('[ERROR] SSE connection error.');
+            };
+        }
+
+        function appendRealtimeLog(msg) {
+            const logs = document.getElementById('realtime-logs');
+            const div = document.createElement('div');
+            div.className = 'feed-item';
+            div.innerText = `${new Date().toLocaleTimeString()} - ${msg}`;
+            logs.prepend(div);
+        }
+
+        function clearRealtimeLogs() {
+            document.getElementById('realtime-logs').innerHTML = '';
+        }
+
         checkHealth();
-        loadTables();
         loadMetrics();
     </script>
 </body>
