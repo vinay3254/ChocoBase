@@ -445,16 +445,19 @@ impl Database {
                 table,
                 columns,
                 rows,
-            } => self.execute_insert(&table, columns, rows, ctx),
+                returning,
+            } => self.execute_insert(&table, columns, rows, returning, ctx),
             Statement::Delete {
                 table,
                 where_clause,
-            } => self.execute_delete(&table, where_clause, ctx),
+                returning,
+            } => self.execute_delete(&table, where_clause, returning, ctx),
             Statement::Update {
                 table,
                 assignments,
                 where_clause,
-            } => self.execute_update(&table, assignments, where_clause, ctx),
+                returning,
+            } => self.execute_update(&table, assignments, where_clause, returning, ctx),
             Statement::CreateUser {
                 username,
                 password,
@@ -634,11 +637,83 @@ impl Database {
         Ok(ExecResult::Ok)
     }
 
+    fn project_returning_rows(
+        schema: &TableSchema,
+        rows: Vec<Vec<Value>>,
+        returning: &SelectColumns,
+        ctx: &crate::auth::ExecutionContext,
+    ) -> Result<ExecResult> {
+        match returning {
+            SelectColumns::All => {
+                let names = schema.columns.iter().map(|c| c.name.clone()).collect();
+                Ok(ExecResult::Rows {
+                    columns: names,
+                    rows,
+                })
+            }
+            SelectColumns::List(col_names) => {
+                let mut indices = Vec::new();
+                for c in col_names {
+                    let idx = schema
+                        .column_index(c)
+                        .ok_or(PlanError::NoSuchColumn(c.clone()))?;
+                    indices.push(idx);
+                }
+                let projected_rows = rows
+                    .into_iter()
+                    .map(|r| indices.iter().map(|&i| r[i].clone()).collect())
+                    .collect();
+                Ok(ExecResult::Rows {
+                    columns: col_names.clone(),
+                    rows: projected_rows,
+                })
+            }
+            SelectColumns::Items(items) => {
+                let mut names = Vec::new();
+                for (i, item) in items.iter().enumerate() {
+                    match item {
+                        crate::sql::ast::SelectItem::All => {
+                            names.extend(schema.columns.iter().map(|c| c.name.clone()))
+                        }
+                        crate::sql::ast::SelectItem::Expr { alias, expr } => {
+                            let name = alias.clone().unwrap_or_else(|| match expr {
+                                Expr::Column(c) => c.clone(),
+                                _ => format!("col_{i}"),
+                            });
+                            names.push(name);
+                        }
+                    }
+                }
+                let mut projected_rows = Vec::new();
+                for r in &rows {
+                    let mut out_row = Vec::new();
+                    for item in items {
+                        match item {
+                            crate::sql::ast::SelectItem::All => out_row.extend(r.clone()),
+                            crate::sql::ast::SelectItem::Expr { expr, .. } => {
+                                let val =
+                                    crate::plan::expr::eval_with_context(expr, schema, r, ctx)
+                                        .map_err(DbError::Plan)?;
+                                out_row.push(val);
+                            }
+                        }
+                    }
+                    projected_rows.push(out_row);
+                }
+                Ok(ExecResult::Rows {
+                    columns: names,
+                    rows: projected_rows,
+                })
+            }
+        }
+    }
+
     fn execute_insert(
         &mut self,
         table: &str,
         columns: Option<Vec<String>>,
         rows: Vec<Vec<Expr>>,
+        returning: Option<SelectColumns>,
         ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
         let schema = self
@@ -676,6 +751,7 @@ impl Database {
             .map(|i| (i.name.clone(), i.root_page))
             .collect();
         let mut count = 0usize;
+        let mut affected_rows = Vec::new();
 
         for expr_row in &rows {
             let mut full_row = vec![Value::Null; schema.columns.len()];
@@ -768,7 +844,7 @@ impl Database {
                 table: table.to_string(),
                 action: crate::server::protocol::ChangeAction::Insert,
                 old_row: None,
-                new_row: Some(full_row),
+                new_row: Some(full_row.clone()),
                 timestamp_ms: now,
             };
             if self.pager.in_transaction() {
@@ -776,6 +852,7 @@ impl Database {
             } else if let Some(tx) = &self.change_tx {
                 let _ = tx.send(event);
             }
+            affected_rows.push(full_row);
             count += 1;
         }
 
@@ -791,7 +868,11 @@ impl Database {
             }
         }
 
-        Ok(ExecResult::Modified(count))
+        if let Some(ret_cols) = &returning {
+            Self::project_returning_rows(&schema, affected_rows, ret_cols, ctx)
+        } else {
+            Ok(ExecResult::Modified(count))
+        }
     }
 
     fn execute_update(
@@ -799,6 +880,7 @@ impl Database {
         table: &str,
         assignments: Vec<(String, Expr)>,
         where_clause: Option<Expr>,
+        returning: Option<SelectColumns>,
         ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
         let where_clause = self.apply_rls_filter(
@@ -847,6 +929,7 @@ impl Database {
             .map(|i| (i.name.clone(), i.root_page))
             .collect();
         let mut count = 0usize;
+        let mut affected_rows = Vec::new();
 
         for old_row in &old_rows {
             let mut new_row = old_row.clone();
@@ -893,6 +976,7 @@ impl Database {
             } else if let Some(tx) = &self.change_tx {
                 let _ = tx.send(event);
             }
+            affected_rows.push(new_row);
             count += 1;
         }
 
@@ -908,7 +992,11 @@ impl Database {
             }
         }
 
-        Ok(ExecResult::Modified(count))
+        if let Some(ret_cols) = &returning {
+            Self::project_returning_rows(&schema, affected_rows, ret_cols, ctx)
+        } else {
+            Ok(ExecResult::Modified(count))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1315,6 +1403,7 @@ impl Database {
         &mut self,
         table: &str,
         where_clause: Option<Expr>,
+        returning: Option<SelectColumns>,
         ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
         let where_clause = self.apply_rls_filter(
@@ -1352,6 +1441,7 @@ impl Database {
             .map(|i| (i.name.clone(), i.root_page))
             .collect();
         let mut count = 0usize;
+        let mut affected_rows = Vec::new();
 
         for row in &rows_to_delete {
             let mut schema_for_write = schema.clone();
@@ -1391,6 +1481,7 @@ impl Database {
             } else if let Some(tx) = &self.change_tx {
                 let _ = tx.send(event);
             }
+            affected_rows.push(row.clone());
             count += 1;
         }
 
@@ -1406,7 +1497,11 @@ impl Database {
             }
         }
 
-        Ok(ExecResult::Modified(count))
+        if let Some(ret_cols) = &returning {
+            Self::project_returning_rows(&schema, affected_rows, ret_cols, ctx)
+        } else {
+            Ok(ExecResult::Modified(count))
+        }
     }
 
     pub fn list_tables(&mut self) -> Vec<String> {
@@ -1515,6 +1610,7 @@ impl Database {
             Statement::Delete {
                 table,
                 where_clause,
+                ..
             } => Ok(vec![format!(
                 "-> Delete on {table} filter={where_clause:?}"
             )]),
