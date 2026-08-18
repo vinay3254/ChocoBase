@@ -125,3 +125,65 @@ async fn realtime_changefeed_respects_table_subscription_filters() {
     let orders_event = timeout(Duration::from_millis(200), read_response(&mut orders_reader, &mut orders_buf)).await;
     assert!(orders_event.is_err(), "Orders subscriber should not receive items event");
 }
+
+#[tokio::test]
+async fn realtime_changefeed_buffers_events_until_commit_and_discards_on_rollback() {
+    let file = NamedTempFile::new().unwrap();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = ServerConfig::new(addr, file.path());
+    let (_server, bound_addr) = Server::bind(config).await.unwrap();
+
+    // Subscriber
+    let mut sub_socket = TcpStream::connect(bound_addr).await.unwrap();
+    let (mut sub_reader, mut sub_writer) = sub_socket.split();
+    let mut sub_buf = Vec::new();
+    write_request(&mut sub_writer, &Request::Subscribe { table: Some("accounts".into()) }).await.unwrap();
+    assert_eq!(read_response(&mut sub_reader, &mut sub_buf).await.unwrap().unwrap(), Response::Subscribed);
+
+    // Mutator
+    let mut mut_socket = TcpStream::connect(bound_addr).await.unwrap();
+    let (mut mut_reader, mut mut_writer) = mut_socket.split();
+    let mut mut_buf = Vec::new();
+
+    write_request(&mut mut_writer, &Request::Query { sql: "CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance INTEGER)".into() }).await.unwrap();
+    let _ = read_response(&mut mut_reader, &mut mut_buf).await.unwrap();
+
+    // 1. Transaction that ROLLS BACK
+    write_request(&mut mut_writer, &Request::Query { sql: "BEGIN".into() }).await.unwrap();
+    let _ = read_response(&mut mut_reader, &mut mut_buf).await.unwrap();
+
+    write_request(&mut mut_writer, &Request::Query { sql: "INSERT INTO accounts (id, balance) VALUES (1, 500)".into() }).await.unwrap();
+    let _ = read_response(&mut mut_reader, &mut mut_buf).await.unwrap();
+
+    write_request(&mut mut_writer, &Request::Query { sql: "ROLLBACK".into() }).await.unwrap();
+    let _ = read_response(&mut mut_reader, &mut mut_buf).await.unwrap();
+
+    // Verify NO event was received during or after rollback
+    let rolled_back_event = timeout(Duration::from_millis(200), read_response(&mut sub_reader, &mut sub_buf)).await;
+    assert!(rolled_back_event.is_err(), "Rolled back transaction must NOT emit change events");
+
+    // 2. Transaction that COMMITS
+    write_request(&mut mut_writer, &Request::Query { sql: "BEGIN".into() }).await.unwrap();
+    let _ = read_response(&mut mut_reader, &mut mut_buf).await.unwrap();
+
+    write_request(&mut mut_writer, &Request::Query { sql: "INSERT INTO accounts (id, balance) VALUES (2, 1000)".into() }).await.unwrap();
+    let _ = read_response(&mut mut_reader, &mut mut_buf).await.unwrap();
+
+    // Still no event before COMMIT
+    let before_commit = timeout(Duration::from_millis(100), read_response(&mut sub_reader, &mut sub_buf)).await;
+    assert!(before_commit.is_err(), "Events must not emit prior to COMMIT");
+
+    write_request(&mut mut_writer, &Request::Query { sql: "COMMIT".into() }).await.unwrap();
+    let _ = read_response(&mut mut_reader, &mut mut_buf).await.unwrap();
+
+    // Now event arrives!
+    let commit_event = timeout(Duration::from_secs(2), read_response(&mut sub_reader, &mut sub_buf)).await.unwrap().unwrap().unwrap();
+    match commit_event {
+        Response::Event(evt) => {
+            assert_eq!(evt.table, "accounts");
+            assert_eq!(evt.action, ChangeAction::Insert);
+            assert_eq!(evt.new_row, Some(vec![Value::Integer(2), Value::Integer(1000)]));
+        }
+        other => panic!("expected ChangeEvent after commit, got {other:?}"),
+    }
+}
