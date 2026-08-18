@@ -69,6 +69,8 @@ pub enum Token {
     CosineDistance,
     L2Distance,
     InnerProduct,
+    FtsMatch,
+    FtsRank,
     Explain,
     In,
     Exists,
