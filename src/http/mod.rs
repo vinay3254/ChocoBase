@@ -460,6 +460,10 @@ async fn handle_http_connection(
         handle_auth_refresh(&db, &body).await
     } else if method == "POST" && path == "/v1/auth/logout" {
         handle_auth_logout(&db, &body).await
+    } else if (method == "POST" || method == "GET") && path == "/v1/auth/oauth/authorize" {
+        handle_oauth_authorize(query_string, &body).await
+    } else if method == "POST" && path == "/v1/auth/oauth/callback" {
+        handle_oauth_callback(&db, &body).await
     } else if path.starts_with("/v1/functions/v1") {
         functions::handle_functions_request(&functions_reg, &db, &method, path, &body, &exec_ctx)
             .await
@@ -655,6 +659,148 @@ async fn handle_auth_logout(
         crate::auth::revoke_refresh_token(refresh_token);
     }
     (200, "OK", serde_json::json!({ "status": "logged_out" }))
+}
+
+async fn handle_oauth_authorize(
+    query_string: &str,
+    body: &str,
+) -> (u16, &'static str, serde_json::Value) {
+    let mut provider = "google".to_string();
+    let mut redirect_uri = "http://localhost:3000/callback".to_string();
+
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(p) = parsed.get("provider").and_then(|v| v.as_str()) {
+            provider = p.to_string();
+        }
+        if let Some(r) = parsed.get("redirect_uri").and_then(|v| v.as_str()) {
+            redirect_uri = r.to_string();
+        }
+    } else if !query_string.is_empty() {
+        for part in query_string.split('&') {
+            if let Some((k, v)) = part.split_once('=') {
+                if k == "provider" {
+                    provider = v.to_string();
+                } else if k == "redirect_uri" {
+                    redirect_uri = v.to_string();
+                }
+            }
+        }
+    }
+
+    match crate::auth::oauth::generate_authorize_url(&provider, &redirect_uri) {
+        Ok(resp) => (
+            200,
+            "OK",
+            serde_json::json!({
+                "status": "ok",
+                "provider": resp.provider,
+                "url": resp.url,
+                "state": resp.state,
+            }),
+        ),
+        Err(err) => (400, "Bad Request", serde_json::json!({ "error": err })),
+    }
+}
+
+async fn handle_oauth_callback(
+    db: &SharedDatabase,
+    body: &str,
+) -> (u16, &'static str, serde_json::Value) {
+    let req: crate::auth::oauth::OAuthCallbackRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                400,
+                "Bad Request",
+                serde_json::json!({ "error": "invalid OAuth callback JSON payload" }),
+            );
+        }
+    };
+
+    if req.code.is_empty() {
+        return (
+            400,
+            "Bad Request",
+            serde_json::json!({ "error": "missing authorization code" }),
+        );
+    }
+
+    let username = req.username.unwrap_or_else(|| {
+        if let Some(e) = &req.email {
+            e.split('@').next().unwrap_or("oauth_user").to_string()
+        } else {
+            format!("{}_user", req.provider)
+        }
+    });
+
+    let safe_user = match sanitize_identifier(&username) {
+        Ok(u) => u,
+        Err(_) => "oauth_user".to_string(),
+    };
+
+    // Ensure user exists in _users table
+    let select_sql = format!("SELECT id, role FROM _users WHERE username = '{safe_user}'");
+    let user_id = if let Ok(ExecResult::Rows { rows, .. }) =
+        db.execute_with_context(&select_sql, &ExecutionContext::admin())
+    {
+        if let Some(row) = rows.first() {
+            match &row[0] {
+                Value::Integer(id) => *id,
+                _ => 1,
+            }
+        } else {
+            // Auto-create user
+            let random_pass = format!("oauth_pass_{}", req.code);
+            let safe_pass = escape_sql_string(&crate::auth::hash_password(&random_pass));
+            let insert_sql = format!(
+                "INSERT INTO _users (username, password_hash, role) VALUES ('{safe_user}', '{safe_pass}', 'user')"
+            );
+            let _ = db.execute_with_context(&insert_sql, &ExecutionContext::admin());
+
+            if let Ok(ExecResult::Rows { rows: r2, .. }) =
+                db.execute_with_context(&select_sql, &ExecutionContext::admin())
+            {
+                r2.first()
+                    .and_then(|r| match &r[0] {
+                        Value::Integer(id) => Some(*id),
+                        _ => None,
+                    })
+                    .unwrap_or(2)
+            } else {
+                2
+            }
+        }
+    } else {
+        1
+    };
+
+    let role = "user";
+    let secret = crate::auth::jwt_secret();
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + 86400 * 7;
+    let claims = SessionClaims::new(user_id, &safe_user, role, exp);
+    let access_token = sign_jwt(&claims, &secret);
+    let (refresh_token, _) = crate::auth::issue_refresh_token(user_id, &safe_user, role);
+
+    (
+        200,
+        "OK",
+        serde_json::json!({
+            "status": "ok",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "provider": req.provider,
+            "user": {
+                "id": user_id,
+                "username": safe_user,
+                "role": role,
+            }
+        }),
+    )
 }
 
 async fn handle_rpc(
