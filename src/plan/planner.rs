@@ -68,7 +68,7 @@ pub fn build_select_plan_with_context(
     if let Some((col, desc)) = order_by {
         let idx = schema
             .column_index(&col)
-            .ok_or_else(|| PlanError::NoSuchColumn(col))?;
+            .ok_or(PlanError::NoSuchColumn(col))?;
         plan = Box::new(Sort::new(plan, idx, desc));
     }
     plan = Box::new(Project {
