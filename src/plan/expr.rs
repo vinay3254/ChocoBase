@@ -185,7 +185,85 @@ pub fn eval_with_context(
             };
             Ok(Value::Float(dist))
         }
+        Expr::FtsMatch { expr, query } => {
+            let val = eval_with_context(expr, schema, row, ctx)?;
+            let text = match &val {
+                Value::Text(s) | Value::Json(s) => s.as_str(),
+                _ => return Ok(Value::Boolean(false)),
+            };
+            Ok(Value::Boolean(fts_matches(text, query)))
+        }
+        Expr::FtsRank { expr, query } => {
+            let val = eval_with_context(expr, schema, row, ctx)?;
+            let text = match &val {
+                Value::Text(s) | Value::Json(s) => s.as_str(),
+                _ => return Ok(Value::Float(0.0)),
+            };
+            Ok(Value::Float(fts_rank(text, query)))
+        }
     }
+}
+
+pub fn tokenize_words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric() && c != '*' && c != ':')
+        .map(|w| w.trim().to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+pub fn fts_matches(doc: &str, query: &str) -> bool {
+    let doc_tokens = tokenize_words(doc);
+    let query_tokens = tokenize_words(query);
+    if query_tokens.is_empty() {
+        return false;
+    }
+
+    for q in &query_tokens {
+        let is_prefix = q.ends_with(":*") || q.ends_with('*');
+        let clean_q = q.trim_end_matches(":*").trim_end_matches('*');
+        if clean_q.is_empty() {
+            continue;
+        }
+        let matched = if is_prefix {
+            doc_tokens.iter().any(|d| d.starts_with(clean_q))
+        } else {
+            doc_tokens.iter().any(|d| d == clean_q)
+        };
+        if !matched {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn fts_rank(doc: &str, query: &str) -> f64 {
+    let doc_tokens = tokenize_words(doc);
+    let query_tokens = tokenize_words(query);
+    if doc_tokens.is_empty() || query_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let mut score = 0.0f64;
+    for q in &query_tokens {
+        let is_prefix = q.ends_with(":*") || q.ends_with('*');
+        let clean_q = q.trim_end_matches(":*").trim_end_matches('*');
+        if clean_q.is_empty() {
+            continue;
+        }
+        let count = if is_prefix {
+            doc_tokens.iter().filter(|d| d.starts_with(clean_q)).count()
+        } else {
+            doc_tokens.iter().filter(|d| *d == clean_q).count()
+        };
+
+        if count > 0 {
+            let tf = (count as f64) / (count as f64 + 1.2);
+            score += tf;
+        }
+    }
+
+    let length_norm = 1.0 / ((doc_tokens.len() as f64).sqrt() + 1.0);
+    score * (1.0 + length_norm)
 }
 
 pub fn parse_vector(v: &Value) -> Option<Vec<f32>> {
