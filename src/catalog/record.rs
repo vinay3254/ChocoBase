@@ -1,8 +1,10 @@
-use crate::types::schema::{Column, IndexSchema, TableSchema};
+use crate::types::schema::{Column, IndexSchema, PolicyCmd, PolicySchema, TableSchema};
 use crate::types::value::ColumnType;
 
-const KIND_TABLE: u8 = 1;
-const KIND_INDEX: u8 = 2;
+pub const KIND_TABLE: u8 = 1;
+pub const KIND_INDEX: u8 = 2;
+pub const KIND_POLICY: u8 = 3;
+
 const TYPE_INTEGER: u8 = 1;
 const TYPE_TEXT: u8 = 2;
 const TYPE_BOOLEAN: u8 = 3;
@@ -53,6 +55,7 @@ pub fn encode_table_record(schema: &TableSchema) -> Vec<u8> {
         out.push(col.not_null as u8);
         out.push(col.is_primary_key as u8);
     }
+    out.push(schema.rls_enabled as u8);
     out
 }
 
@@ -77,7 +80,8 @@ pub fn decode_table_record(data: &[u8]) -> TableSchema {
         pos += 1;
         columns.push(Column { name: cname, ty, not_null, is_primary_key });
     }
-    TableSchema { name, columns, root_page }
+    let rls_enabled = if pos < data.len() { data[pos] != 0 } else { false };
+    TableSchema { name, columns, root_page, rls_enabled }
 }
 
 pub fn encode_index_record(schema: &IndexSchema) -> Vec<u8> {
@@ -102,6 +106,49 @@ pub fn decode_index_record(data: &[u8]) -> IndexSchema {
     IndexSchema { name, table, column, root_page }
 }
 
+pub fn encode_policy_record(schema: &PolicySchema) -> Vec<u8> {
+    let mut out = vec![KIND_POLICY];
+    write_string(&mut out, &schema.name);
+    write_string(&mut out, &schema.table);
+    let cmd_tag = match schema.cmd {
+        PolicyCmd::Select => 0,
+        PolicyCmd::Insert => 1,
+        PolicyCmd::Update => 2,
+        PolicyCmd::Delete => 3,
+        PolicyCmd::All => 4,
+    };
+    out.push(cmd_tag);
+    let using_json = serde_json::to_string(&schema.using_expr).unwrap_or_default();
+    write_string(&mut out, &using_json);
+    let check_json = serde_json::to_string(&schema.with_check).unwrap_or_default();
+    write_string(&mut out, &check_json);
+    out
+}
+
+pub fn decode_policy_record(data: &[u8]) -> PolicySchema {
+    assert_eq!(data[0], KIND_POLICY);
+    let mut pos = 1;
+    let (name, next) = read_string(data, pos);
+    pos = next;
+    let (table, next) = read_string(data, pos);
+    pos = next;
+    let cmd = match data[pos] {
+        0 => PolicyCmd::Select,
+        1 => PolicyCmd::Insert,
+        2 => PolicyCmd::Update,
+        3 => PolicyCmd::Delete,
+        _ => PolicyCmd::All,
+    };
+    pos += 1;
+    let (using_json, next) = read_string(data, pos);
+    pos = next;
+    let using_expr = serde_json::from_str(&using_json).ok().flatten();
+    let (check_json, _) = read_string(data, pos);
+    let with_check = serde_json::from_str(&check_json).ok().flatten();
+
+    PolicySchema { name, table, cmd, using_expr, with_check }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +162,7 @@ mod tests {
                 Column { name: "email".into(), ty: ColumnType::Text, not_null: false, is_primary_key: false },
             ],
             root_page: 7,
+            rls_enabled: true,
         };
         let encoded = encode_table_record(&schema);
         assert_eq!(record_kind(&encoded), KIND_TABLE);
@@ -125,6 +173,7 @@ mod tests {
         assert_eq!(decoded.columns[0].name, "id");
         assert!(decoded.columns[0].is_primary_key);
         assert_eq!(decoded.columns[1].ty, ColumnType::Text);
+        assert!(decoded.rls_enabled);
     }
 
     #[test]
