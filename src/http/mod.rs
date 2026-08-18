@@ -235,6 +235,80 @@ async fn handle_http_connection(
         return Ok(());
     }
 
+    if method == "GET" && path == "/v1/realtime/v1/stream" {
+        let mut channel_name = "general";
+        for pair in query_string.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k == "channel" {
+                    channel_name = v;
+                }
+            }
+        }
+
+        if channel_name.starts_with("private:")
+            && !exec_ctx.is_authenticated()
+            && !exec_ctx.is_admin
+        {
+            let resp_json = serde_json::json!({ "error": "authentication required for private broadcast channel" });
+            let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
+            let header = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                resp_bytes.len()
+            );
+            socket.write_all(header.as_bytes()).await?;
+            socket.write_all(&resp_bytes).await?;
+            socket.flush().await?;
+            return Ok(());
+        }
+
+        let init_header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n{cors_headers}\r\n"
+        );
+        socket.write_all(init_header.as_bytes()).await?;
+        let init_event = format!(
+            "event: connected\ndata: {{\"status\":\"subscribed\",\"channel\":\"{channel_name}\"}}\n\n"
+        );
+        socket.write_all(init_event.as_bytes()).await?;
+        socket.flush().await?;
+
+        let mut bcast_rx = realtime_mgr.subscribe(channel_name);
+        let mut change_rx = db.subscribe();
+
+        loop {
+            tokio::select! {
+                bcast_res = bcast_rx.recv() => {
+                    match bcast_res {
+                        Ok(msg) => {
+                            let json_payload = serde_json::to_string(&msg).unwrap_or_default();
+                            let sse_chunk = format!("event: broadcast\ndata: {json_payload}\n\n");
+                            if socket.write_all(sse_chunk.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            let _ = socket.flush().await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+                change_res = change_rx.recv() => {
+                    match change_res {
+                        Ok(change) => {
+                            let json_payload = serde_json::to_string(&change).unwrap_or_default();
+                            let sse_chunk = format!("event: change\ndata: {json_payload}\n\n");
+                            if socket.write_all(sse_chunk.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            let _ = socket.flush().await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
     if path.starts_with("/v1/storage/") {
         let (status_code, status_text, json_body, binary_data) =
             storage::handle_storage_request(&db, &method, path, query_string, &body, &exec_ctx)
