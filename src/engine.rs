@@ -554,6 +554,20 @@ impl Database {
                     as_text: *as_text,
                 })
             }
+            Expr::FtsMatch { expr: inner, query } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner, ctx)?;
+                Ok(Expr::FtsMatch {
+                    expr: Box::new(resolved_inner),
+                    query: query.clone(),
+                })
+            }
+            Expr::FtsRank { expr: inner, query } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner, ctx)?;
+                Ok(Expr::FtsRank {
+                    expr: Box::new(resolved_inner),
+                    query: query.clone(),
+                })
+            }
             other => Ok(other.clone()),
         }
     }
