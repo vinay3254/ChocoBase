@@ -15,7 +15,12 @@ use crate::error::Result;
 use crate::types::value::Value;
 
 pub mod dashboard;
+pub mod functions;
+pub mod realtime_channels;
 pub mod storage;
+
+use crate::functions::FunctionRegistry;
+use realtime_channels::RealtimeChannelManager;
 
 pub struct HttpServer {
     shutdown_tx: broadcast::Sender<()>,
@@ -31,6 +36,9 @@ impl HttpServer {
         let db = Arc::new(db);
         storage::ensure_storage_tables(&db);
 
+        let functions_reg = Arc::new(FunctionRegistry::new());
+        let realtime_mgr = Arc::new(RealtimeChannelManager::new());
+
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -38,8 +46,10 @@ impl HttpServer {
                         match accept_res {
                             Ok((socket, _)) => {
                                 let db_clone = Arc::clone(&db);
+                                let func_clone = Arc::clone(&functions_reg);
+                                let rt_clone = Arc::clone(&realtime_mgr);
                                 tokio::spawn(async move {
-                                    let _ = handle_http_connection(socket, db_clone).await;
+                                    let _ = handle_http_connection(socket, db_clone, func_clone, rt_clone).await;
                                 });
                             }
                             Err(_) => break,
@@ -63,6 +73,8 @@ impl HttpServer {
 async fn handle_http_connection(
     mut socket: TcpStream,
     db: Arc<SharedDatabase>,
+    functions_reg: Arc<FunctionRegistry>,
+    realtime_mgr: Arc<RealtimeChannelManager>,
 ) -> std::io::Result<()> {
     let mut buf = vec![0u8; 16384];
     let n = socket.read(&mut buf).await?;
@@ -295,6 +307,18 @@ async fn handle_http_connection(
         handle_auth_token(&db, body).await
     } else if method == "POST" && path == "/v1/auth/refresh" {
         handle_auth_refresh(&db, body).await
+    } else if path.starts_with("/v1/functions/v1") {
+        functions::handle_functions_request(&functions_reg, &db, &method, path, body, &exec_ctx)
+            .await
+    } else if path.starts_with("/v1/realtime/v1") {
+        realtime_channels::handle_realtime_channel_request(
+            &realtime_mgr,
+            &method,
+            path,
+            body,
+            &exec_ctx,
+        )
+        .await
     } else if path.starts_with("/v1/rpc/") {
         let func_name = &path["/v1/rpc/".len()..];
         handle_rpc(&db, func_name, body, &exec_ctx).await
