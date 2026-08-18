@@ -71,6 +71,7 @@ pub enum Token {
     InnerProduct,
     Explain,
     In,
+    Exists,
     Like,
     Returning,
     Identifier(String),
