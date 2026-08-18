@@ -149,6 +149,20 @@ impl SharedDatabase {
     pub fn pager_stats(&self) -> crate::storage::pager::PagerStats {
         self.db.lock().unwrap().pager_stats()
     }
+
+    pub fn dump_sql(&self) -> Result<String> {
+        let token = self.locks.begin();
+        token.shared("database");
+        let mut db = self.db.lock().unwrap();
+        crate::backup::dump_database(&mut db)
+    }
+
+    pub fn restore_from_sql(&self, sql: &str) -> Result<usize> {
+        let token = self.locks.begin();
+        token.exclusive("database");
+        let mut db = self.db.lock().unwrap();
+        crate::backup::restore_database(&mut db, sql)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
