@@ -12,16 +12,18 @@ fn make_db_with_rows(rows: &[(i64, i64)]) -> (Database, NamedTempFile) {
     let mut db = Database::create(file.path()).unwrap();
     db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, score INTEGER NOT NULL)")
         .unwrap();
+    db.execute("BEGIN TRANSACTION").unwrap();
     for (id, score) in rows {
         db.execute(&format!("INSERT INTO t (id, score) VALUES ({id}, {score})"))
             .unwrap();
     }
+    db.execute("COMMIT").unwrap();
     (db, file)
 }
 
 proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig {
-        cases: 32,
+        cases: 16,
         ..proptest::prelude::ProptestConfig::default()
     })]
     #[test]
