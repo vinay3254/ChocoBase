@@ -115,6 +115,13 @@ pub struct ColumnDef {
     pub primary_key: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VectorMetric {
+    Cosine,
+    L2,
+    InnerProduct,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Column(String),
@@ -123,6 +130,7 @@ pub enum Expr {
         column: String,
     },
     IntLiteral(i64),
+    FloatLiteral(f64),
     StringLiteral(String),
     BoolLiteral(bool),
     Null,
@@ -150,6 +158,11 @@ pub enum Expr {
         expr: Box<Expr>,
         path: String,
         as_text: bool,
+    },
+    VectorDistance {
+        metric: VectorMetric,
+        left: Box<Expr>,
+        right: Box<Expr>,
     },
     AuthUid,
 }
