@@ -29,10 +29,12 @@ pub fn dump_database(db: &mut Database) -> Result<String> {
         let mut col_defs = Vec::new();
         for col in &schema.columns {
             let type_str = match col.ty {
-                ColumnType::Integer => "INTEGER",
-                ColumnType::Text => "TEXT",
-                ColumnType::Boolean => "BOOLEAN",
-                ColumnType::Json => "JSON",
+                ColumnType::Integer => "INTEGER".to_string(),
+                ColumnType::Float => "FLOAT".to_string(),
+                ColumnType::Text => "TEXT".to_string(),
+                ColumnType::Boolean => "BOOLEAN".to_string(),
+                ColumnType::Json => "JSON".to_string(),
+                ColumnType::Vector(dim) => format!("VECTOR({dim})"),
             };
             let mut def = format!("{} {}", col.name, type_str);
             if col.is_primary_key {
@@ -68,11 +70,16 @@ pub fn dump_database(db: &mut Database) -> Result<String> {
                 for val in row {
                     match val {
                         Value::Integer(i) => vals.push(i.to_string()),
+                        Value::Float(f) => vals.push(f.to_string()),
                         Value::Text(s) => vals.push(format!("'{}'", s.replace('\'', "''"))),
                         Value::Boolean(b) => {
                             vals.push(if b { "TRUE".into() } else { "FALSE".into() })
                         }
                         Value::Json(j) => vals.push(format!("'{}'", j.replace('\'', "''"))),
+                        Value::Vector(vec) => {
+                            let json = serde_json::to_string(&vec).unwrap_or_else(|_| "[]".into());
+                            vals.push(format!("'{json}'"));
+                        }
                         Value::Null => vals.push("NULL".into()),
                     }
                 }
