@@ -167,7 +167,7 @@ impl AggregateOperator {
                     | AggregateFunc::Avg(e)
                     | AggregateFunc::Min(e)
                     | AggregateFunc::Max(e) => {
-                        let val = crate::plan::expr::eval(&e, &self.input_schema, &row)
+                        let val = crate::plan::expr::eval(e, &self.input_schema, &row)
                             .map_err(|err| ExecError::InvalidValue(err.to_string()))?;
                         acc.update(Some(&val));
                     }
