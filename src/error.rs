@@ -66,6 +66,8 @@ pub enum PlanError {
     NestedTransactionNotSupported,
     #[error("cannot commit or rollback: no transaction is in progress")]
     NoTransactionInProgress,
+    #[error("cannot update primary key column")]
+    CannotUpdatePrimaryKey,
 }
 
 #[derive(Debug, Error)]
@@ -80,6 +82,8 @@ pub enum ExecError {
     BTree(#[from] BTreeError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Plan(#[from] PlanError),
 }
 
 #[derive(Debug, Error)]
