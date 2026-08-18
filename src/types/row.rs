@@ -15,6 +15,7 @@ pub fn encode_row(schema: &TableSchema, values: &[Value]) -> Vec<u8> {
         match v {
             Value::Null => {}
             Value::Integer(i) => out.extend(&i.to_le_bytes()),
+            Value::Float(f) => out.extend(&f.to_le_bytes()),
             Value::Boolean(b) => out.push(if *b { 1 } else { 0 }),
             Value::Text(s) | Value::Json(s) => {
                 assert!(
@@ -25,6 +26,12 @@ pub fn encode_row(schema: &TableSchema, values: &[Value]) -> Vec<u8> {
                 );
                 out.extend(&(s.len() as u16).to_le_bytes());
                 out.extend(s.as_bytes());
+            }
+            Value::Vector(vec) => {
+                out.extend(&(vec.len() as u16).to_le_bytes());
+                for elem in vec {
+                    out.extend(&elem.to_le_bytes());
+                }
             }
         }
     }
@@ -49,6 +56,11 @@ pub fn decode_row(schema: &TableSchema, data: &[u8]) -> Vec<Value> {
                 pos += 8;
                 values.push(Value::Integer(v));
             }
+            ColumnType::Float => {
+                let v = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                values.push(Value::Float(v));
+            }
             ColumnType::Boolean => {
                 values.push(Value::Boolean(data[pos] != 0));
                 pos += 1;
@@ -66,6 +78,17 @@ pub fn decode_row(schema: &TableSchema, data: &[u8]) -> Vec<Value> {
                 let s = String::from_utf8(data[pos..pos + len].to_vec()).unwrap();
                 pos += len;
                 values.push(Value::Json(s));
+            }
+            ColumnType::Vector(_) => {
+                let len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+                pos += 2;
+                let mut vec = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let elem = f32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    vec.push(elem);
+                }
+                values.push(Value::Vector(vec));
             }
         }
     }
