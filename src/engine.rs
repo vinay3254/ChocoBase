@@ -280,6 +280,14 @@ impl Database {
         ctx: &crate::auth::ExecutionContext,
     ) -> Result<ExecResult> {
         let stmt = crate::sql::parser::parse(sql)?;
+        self.execute_statement_with_context(stmt, ctx)
+    }
+
+    pub fn execute_statement_with_context(
+        &mut self,
+        stmt: Statement,
+        ctx: &crate::auth::ExecutionContext,
+    ) -> Result<ExecResult> {
         match stmt {
             Statement::Begin => {
                 if self.pager.in_transaction() {
@@ -424,6 +432,129 @@ impl Database {
             (None, Some(p)) => Ok(Some(p)),
             (Some(w), None) => Ok(Some(w)),
             (None, None) => Ok(None),
+        }
+    }
+
+    pub(crate) fn resolve_subqueries_in_expr(
+        &mut self,
+        expr: &Expr,
+        ctx: &crate::auth::ExecutionContext,
+    ) -> Result<Expr> {
+        match expr {
+            Expr::InSubquery {
+                expr: inner_expr,
+                subquery,
+                negated,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner_expr, ctx)?;
+                let res = self.execute_statement_with_context(*subquery.clone(), ctx)?;
+                let mut list = Vec::new();
+                if let ExecResult::Rows { rows, .. } = res {
+                    for row in rows {
+                        if let Some(first_val) = row.into_iter().next() {
+                            let expr_lit = match first_val {
+                                Value::Integer(i) => Expr::IntLiteral(i),
+                                Value::Float(f) => Expr::FloatLiteral(f),
+                                Value::Text(s) => Expr::StringLiteral(s),
+                                Value::Boolean(b) => Expr::BoolLiteral(b),
+                                Value::Json(j) => Expr::StringLiteral(j),
+                                Value::Vector(v) => Expr::StringLiteral(
+                                    serde_json::to_string(&v).unwrap_or_default(),
+                                ),
+                                Value::Null => Expr::Null,
+                            };
+                            list.push(expr_lit);
+                        }
+                    }
+                }
+                Ok(Expr::InList {
+                    expr: Box::new(resolved_inner),
+                    list,
+                    negated: *negated,
+                })
+            }
+            Expr::Exists { subquery, negated } => {
+                let res = self.execute_statement_with_context(*subquery.clone(), ctx)?;
+                let has_rows = match res {
+                    ExecResult::Rows { rows, .. } => !rows.is_empty(),
+                    _ => false,
+                };
+                let result_bool = if *negated { !has_rows } else { has_rows };
+                Ok(Expr::BoolLiteral(result_bool))
+            }
+            Expr::BinaryOp { op, left, right } => {
+                let resolved_left = self.resolve_subqueries_in_expr(left, ctx)?;
+                let resolved_right = self.resolve_subqueries_in_expr(right, ctx)?;
+                Ok(Expr::BinaryOp {
+                    op: *op,
+                    left: Box::new(resolved_left),
+                    right: Box::new(resolved_right),
+                })
+            }
+            Expr::IsNull {
+                expr: inner,
+                negated,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner, ctx)?;
+                Ok(Expr::IsNull {
+                    expr: Box::new(resolved_inner),
+                    negated: *negated,
+                })
+            }
+            Expr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner, ctx)?;
+                let mut resolved_list = Vec::with_capacity(list.len());
+                for item in list {
+                    resolved_list.push(self.resolve_subqueries_in_expr(item, ctx)?);
+                }
+                Ok(Expr::InList {
+                    expr: Box::new(resolved_inner),
+                    list: resolved_list,
+                    negated: *negated,
+                })
+            }
+            Expr::Like {
+                expr: inner,
+                pattern,
+                negated,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner, ctx)?;
+                Ok(Expr::Like {
+                    expr: Box::new(resolved_inner),
+                    pattern: pattern.clone(),
+                    negated: *negated,
+                })
+            }
+            Expr::VectorDistance {
+                metric,
+                left,
+                right,
+            } => {
+                let resolved_left = self.resolve_subqueries_in_expr(left, ctx)?;
+                let resolved_right = self.resolve_subqueries_in_expr(right, ctx)?;
+                Ok(Expr::VectorDistance {
+                    metric: *metric,
+                    left: Box::new(resolved_left),
+                    right: Box::new(resolved_right),
+                })
+            }
+            Expr::JsonExtract {
+                expr: inner,
+                path,
+                as_text,
+            } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner, ctx)?;
+                Ok(Expr::JsonExtract {
+                    expr: Box::new(resolved_inner),
+                    path: path.clone(),
+                    as_text: *as_text,
+                })
+            }
+            other => Ok(other.clone()),
         }
     }
 
@@ -889,6 +1020,11 @@ impl Database {
             where_clause,
             ctx,
         )?;
+        let where_clause = if let Some(w) = where_clause {
+            Some(self.resolve_subqueries_in_expr(&w, ctx)?)
+        } else {
+            None
+        };
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
@@ -1037,6 +1173,11 @@ impl Database {
             )?
         } else {
             where_clause
+        };
+        let where_clause = if let Some(w) = where_clause {
+            Some(self.resolve_subqueries_in_expr(&w, ctx)?)
+        } else {
+            None
         };
 
         if is_join {
@@ -1442,6 +1583,11 @@ impl Database {
             where_clause,
             ctx,
         )?;
+        let where_clause = if let Some(w) = where_clause {
+            Some(self.resolve_subqueries_in_expr(&w, ctx)?)
+        } else {
+            None
+        };
         let schema = self
             .catalog
             .get_table(&mut self.pager, table)?
