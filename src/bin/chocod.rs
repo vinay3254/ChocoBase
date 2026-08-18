@@ -8,13 +8,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use dbengine::{HttpServer, Server, ServerConfig, SharedDatabase};
+use dbengine::{HttpServer, Server, ServerConfig};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    let mut bind_addr: SocketAddr = "127.0.0.1:8765".parse().unwrap();
-    let mut http_addr: Option<SocketAddr> = None;
+    let mut bind_addr: SocketAddr = "127.0.0.1:5433".parse().unwrap();
+    let mut http_addr: Option<SocketAddr> = Some("127.0.0.1:8080".parse().unwrap());
     let mut db_path = PathBuf::from("chocobase.db");
 
     let mut i = 1;
@@ -50,6 +50,10 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
+            "--no-http" => {
+                http_addr = None;
+                i += 1;
+            }
             "--db" | "-d" => {
                 if i + 1 < args.len() {
                     db_path = PathBuf::from(&args[i + 1]);
@@ -61,18 +65,24 @@ async fn main() -> ExitCode {
             }
             "--help" | "-h" => {
                 println!("ChocoBase Server Daemon (chocod)");
-                println!("Usage: chocod [options]");
+                println!("Usage: chocod [options] [DB_PATH]");
                 println!();
                 println!("Options:");
-                println!("  -b, --bind <ADDR:PORT>        TCP wire protocol bind address (default: 127.0.0.1:8765)");
-                println!("      --http-bind <ADDR:PORT>   HTTP REST gateway bind address (e.g. 127.0.0.1:8080)");
+                println!("  -b, --bind <ADDR:PORT>        TCP wire protocol bind address (default: 127.0.0.1:5433)");
+                println!("      --http-bind <ADDR:PORT>   HTTP REST & Studio bind address (default: 127.0.0.1:8080)");
+                println!("      --no-http                 Disable HTTP gateway and Studio dashboard");
                 println!("  -d, --db <PATH>               Path to database file (default: chocobase.db)");
                 println!("  -h, --help                    Print help message");
                 return ExitCode::SUCCESS;
             }
             other => {
-                eprintln!("unknown argument '{other}'. Use --help for usage.");
-                return ExitCode::FAILURE;
+                if !other.starts_with('-') {
+                    db_path = PathBuf::from(other);
+                    i += 1;
+                } else {
+                    eprintln!("unknown argument '{other}'. Use --help for usage.");
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
@@ -88,17 +98,8 @@ async fn main() -> ExitCode {
     };
 
     let _http_server = if let Some(http_addr) = http_addr {
-        println!("Starting ChocoBase HTTP REST gateway on {http_addr}");
-        let db = match SharedDatabase::open(&db_path) {
-            Ok(db) => db,
-            Err(_) => match SharedDatabase::create(&db_path) {
-                Ok(db) => db,
-                Err(e) => {
-                    eprintln!("failed to initialize HTTP database handle: {e}");
-                    return ExitCode::FAILURE;
-                }
-            },
-        };
+        println!("Starting ChocoBase HTTP REST gateway & Studio on http://{http_addr}/dashboard");
+        let db = server.db();
         match HttpServer::bind(http_addr, db).await {
             Ok((http_srv, _)) => Some(http_srv),
             Err(e) => {
@@ -118,8 +119,7 @@ async fn main() -> ExitCode {
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            println!("\nShutdown signal received, shutting down cleanly...");
-            server.shutdown();
+            println!("\nShutting down ChocoBase gracefully...");
         }
     }
 
