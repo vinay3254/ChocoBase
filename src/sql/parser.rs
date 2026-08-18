@@ -528,11 +528,44 @@ impl Parser {
                 _ => break,
             }
         }
+        let returning = self.parse_returning_clause()?;
         Ok(Statement::Insert {
             table,
             columns,
             rows,
+            returning,
         })
+    }
+
+    fn parse_returning_clause(&mut self) -> Result<Option<SelectColumns>, ParseError> {
+        if matches!(self.peek(), Token::Returning) {
+            self.advance();
+            if matches!(self.peek(), Token::Star) {
+                self.advance();
+                Ok(Some(SelectColumns::All))
+            } else {
+                let mut items = Vec::new();
+                loop {
+                    let expr = self.parse_where_expr()?;
+                    let alias = if matches!(self.peek(), Token::As) {
+                        self.advance();
+                        Some(self.expect_identifier()?)
+                    } else {
+                        None
+                    };
+                    items.push(crate::sql::ast::SelectItem::Expr { expr, alias });
+                    match self.peek() {
+                        Token::Comma => {
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
+                Ok(Some(SelectColumns::Items(items)))
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     fn parse_where_expr(&mut self) -> Result<Expr, ParseError> {
@@ -914,10 +947,12 @@ impl Parser {
         } else {
             None
         };
+        let returning = self.parse_returning_clause()?;
         Ok(Statement::Update {
             table,
             assignments,
             where_clause,
+            returning,
         })
     }
 
@@ -931,9 +966,11 @@ impl Parser {
         } else {
             None
         };
+        let returning = self.parse_returning_clause()?;
         Ok(Statement::Delete {
             table,
             where_clause,
+            returning,
         })
     }
 }
@@ -999,6 +1036,31 @@ mod tests {
                 table: "users".into(),
                 columns: Some(vec!["id".into(), "name".into()]),
                 rows: vec![vec![Expr::IntLiteral(1), Expr::StringLiteral("Ada".into())]],
+                returning: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_insert_with_returning() {
+        let stmt =
+            parse("INSERT INTO users (id, name) VALUES (1, 'Ada') RETURNING id, name").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Insert {
+                table: "users".into(),
+                columns: Some(vec!["id".into(), "name".into()]),
+                rows: vec![vec![Expr::IntLiteral(1), Expr::StringLiteral("Ada".into())]],
+                returning: Some(SelectColumns::Items(vec![
+                    SelectItem::Expr {
+                        expr: Expr::Column("id".into()),
+                        alias: None,
+                    },
+                    SelectItem::Expr {
+                        expr: Expr::Column("name".into()),
+                        alias: None,
+                    }
+                ])),
             }
         );
     }
@@ -1015,6 +1077,7 @@ mod tests {
                     vec![Expr::IntLiteral(1), Expr::Null],
                     vec![Expr::IntLiteral(2), Expr::BoolLiteral(true)],
                 ],
+                returning: None,
             }
         );
     }
@@ -1097,7 +1160,8 @@ mod tests {
 
     #[test]
     fn parses_update() {
-        let stmt = parse("UPDATE t SET name = 'Bea', active = FALSE WHERE id = 1").unwrap();
+        let stmt =
+            parse("UPDATE t SET name = 'Bea', active = FALSE WHERE id = 1 RETURNING *").unwrap();
         assert_eq!(
             stmt,
             Statement::Update {
@@ -1111,13 +1175,14 @@ mod tests {
                     left: Box::new(Expr::Column("id".into())),
                     right: Box::new(Expr::IntLiteral(1)),
                 }),
+                returning: Some(SelectColumns::All),
             }
         );
     }
 
     #[test]
     fn parses_delete() {
-        let stmt = parse("DELETE FROM t WHERE id = 1").unwrap();
+        let stmt = parse("DELETE FROM t WHERE id = 1 RETURNING id").unwrap();
         assert_eq!(
             stmt,
             Statement::Delete {
@@ -1127,6 +1192,10 @@ mod tests {
                     left: Box::new(Expr::Column("id".into())),
                     right: Box::new(Expr::IntLiteral(1)),
                 }),
+                returning: Some(SelectColumns::Items(vec![SelectItem::Expr {
+                    expr: Expr::Column("id".into()),
+                    alias: None,
+                }])),
             }
         );
     }
