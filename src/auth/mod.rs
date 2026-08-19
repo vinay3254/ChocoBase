@@ -141,7 +141,9 @@ impl SessionClaims {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionContext {
     pub user_id: Option<i64>,
+    pub username: Option<String>,
     pub role: Option<String>,
+    pub claims: Option<SessionClaims>,
     pub is_admin: bool,
 }
 
@@ -149,7 +151,9 @@ impl ExecutionContext {
     pub fn anonymous() -> Self {
         Self {
             user_id: None,
+            username: None,
             role: None,
+            claims: None,
             is_admin: false,
         }
     }
@@ -157,7 +161,9 @@ impl ExecutionContext {
     pub fn admin() -> Self {
         Self {
             user_id: Some(0),
+            username: Some("admin".into()),
             role: Some("admin".into()),
+            claims: None,
             is_admin: true,
         }
     }
@@ -166,7 +172,9 @@ impl ExecutionContext {
         let is_admin = role == "admin";
         Self {
             user_id: Some(user_id),
+            username: None,
             role: Some(role.to_string()),
+            claims: None,
             is_admin,
         }
     }
@@ -175,7 +183,9 @@ impl ExecutionContext {
         let is_admin = claims.role == "admin";
         Self {
             user_id: Some(claims.sub),
+            username: Some(claims.username.clone()),
             role: Some(claims.role.clone()),
+            claims: Some(claims.clone()),
             is_admin,
         }
     }
