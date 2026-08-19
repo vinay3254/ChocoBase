@@ -1,5 +1,6 @@
 import { AuthClient } from './auth.js';
 import { FunctionsClient } from './functions.js';
+import { GraphQLClient } from './graphql.js';
 import { PostgrestQueryBuilder } from './query.js';
 import { RealtimeClient } from './realtime.js';
 import { StorageClient } from './storage.js';
@@ -10,6 +11,7 @@ export class ChocoClient {
   public storage: StorageClient;
   public realtime: RealtimeClient;
   public functions: FunctionsClient;
+  public graphql: GraphQLClient;
   private url: string;
   private key?: string;
   private headers: Record<string, string>;
@@ -26,6 +28,7 @@ export class ChocoClient {
     this.storage = new StorageClient(this.url, this.headers);
     this.realtime = new RealtimeClient(this.url, this.key);
     this.functions = new FunctionsClient(this.url, this.headers);
+    this.graphql = new GraphQLClient(this.url, this.headers);
   }
 
   from<T = any>(table: string): PostgrestQueryBuilder<T> {
@@ -72,3 +75,4 @@ export * from './query.js';
 export * from './storage.js';
 export * from './realtime.js';
 export * from './functions.js';
+export * from './graphql.js';
