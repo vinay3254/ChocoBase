@@ -40,6 +40,7 @@ async fn test_webhook_lifecycle_and_http_endpoints() {
         target_url: "http://127.0.0.1:9999/webhook".to_string(),
         headers,
         active: true,
+        max_retries: 3,
     };
 
     let post_res = send_request(
@@ -118,6 +119,7 @@ async fn test_webhook_event_dispatcher_on_database_mutation() {
         target_url: format!("http://127.0.0.1:{}/dispatch", mock_addr.port()),
         headers: HashMap::new(),
         active: true,
+        max_retries: 3,
     };
     webhook_mgr.add_webhook(hook_cfg).await;
 
