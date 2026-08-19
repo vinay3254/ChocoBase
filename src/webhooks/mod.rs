@@ -16,10 +16,28 @@ pub struct WebhookConfig {
     pub target_url: String,
     pub headers: HashMap<String, String>,
     pub active: bool,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: usize,
+}
+
+fn default_max_retries() -> usize {
+    3
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeadLetterEntry {
+    pub id: String,
+    pub webhook_id: String,
+    pub target_url: String,
+    pub payload: serde_json::Value,
+    pub last_error: String,
+    pub attempts: usize,
+    pub failed_at: u64,
 }
 
 pub struct WebhookManager {
     configs: tokio::sync::RwLock<Vec<WebhookConfig>>,
+    dlq: tokio::sync::RwLock<Vec<DeadLetterEntry>>,
 }
 
 impl Default for WebhookManager {
@@ -32,6 +50,7 @@ impl WebhookManager {
     pub fn new() -> Self {
         Self {
             configs: tokio::sync::RwLock::new(Vec::new()),
+            dlq: tokio::sync::RwLock::new(Vec::new()),
         }
     }
 
@@ -50,6 +69,14 @@ impl WebhookManager {
 
     pub async fn list_webhooks(&self) -> Vec<WebhookConfig> {
         self.configs.read().await.clone()
+    }
+
+    pub async fn list_dead_letter_queue(&self) -> Vec<DeadLetterEntry> {
+        self.dlq.read().await.clone()
+    }
+
+    pub async fn clear_dead_letter_queue(&self) {
+        self.dlq.write().await.clear();
     }
 
     pub fn start_dispatcher(self: Arc<Self>, mut change_rx: broadcast::Receiver<ChangeEvent>) {
@@ -87,10 +114,31 @@ impl WebhookManager {
 
                     let target_url = webhook.target_url.clone();
                     let headers = webhook.headers.clone();
+                    let webhook_id = webhook.id.clone();
+                    let max_retries = webhook.max_retries.max(1);
+                    let mgr = Arc::clone(&self);
 
                     tokio::spawn(async move {
-                        let _ =
-                            dispatch_http_post(&target_url, &payload.to_string(), &headers).await;
+                        let payload_str = payload.to_string();
+                        let result =
+                            dispatch_with_retry(&target_url, &payload_str, &headers, max_retries)
+                                .await;
+                        if let Err(e) = result {
+                            let failed_at = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let dlq_entry = DeadLetterEntry {
+                                id: format!("dlq_{}_{failed_at}", webhook_id),
+                                webhook_id,
+                                target_url,
+                                payload,
+                                last_error: e.to_string(),
+                                attempts: max_retries,
+                                failed_at,
+                            };
+                            mgr.dlq.write().await.push(dlq_entry);
+                        }
                     });
                 }
             }
@@ -136,4 +184,28 @@ pub async fn dispatch_http_post(
     let _ = socket.read(&mut buf).await;
 
     Ok(())
+}
+
+pub async fn dispatch_with_retry(
+    url_str: &str,
+    body: &str,
+    headers: &HashMap<String, String>,
+    max_retries: usize,
+) -> std::io::Result<()> {
+    let mut attempt = 0;
+    let mut delay_ms = 25;
+
+    loop {
+        attempt += 1;
+        match dispatch_http_post(url_str, body, headers).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt >= max_retries {
+                    return Err(e);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(1000);
+            }
+        }
+    }
 }
