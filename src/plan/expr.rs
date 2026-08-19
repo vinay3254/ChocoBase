@@ -201,7 +201,75 @@ pub fn eval_with_context(
             };
             Ok(Value::Float(fts_rank(text, query)))
         }
+        Expr::FtsSnippet { expr, query } => {
+            let val = eval_with_context(expr, schema, row, ctx)?;
+            let text = match &val {
+                Value::Text(s) | Value::Json(s) => s.as_str(),
+                _ => return Ok(Value::Text(String::new())),
+            };
+            Ok(Value::Text(fts_snippet(text, query)))
+        }
     }
+}
+
+pub fn fts_snippet(doc: &str, query: &str) -> String {
+    let query_tokens: Vec<String> = tokenize_words(query)
+        .into_iter()
+        .map(|q| q.trim_end_matches(":*").trim_end_matches('*').to_string())
+        .filter(|q| !q.is_empty())
+        .collect();
+
+    if query_tokens.is_empty() || doc.is_empty() {
+        return doc.to_string();
+    }
+
+    let words: Vec<&str> = doc.split_whitespace().collect();
+    if words.is_empty() {
+        return doc.to_string();
+    }
+
+    let mut first_match_idx = None;
+    for (idx, w) in words.iter().enumerate() {
+        let clean = w
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        if query_tokens
+            .iter()
+            .any(|q| clean == *q || (clean.len() >= 3 && clean.contains(q)))
+        {
+            first_match_idx = Some(idx);
+            break;
+        }
+    }
+
+    let match_idx = first_match_idx.unwrap_or(0);
+    let start_idx = match_idx.saturating_sub(4);
+    let end_idx = (match_idx + 5).min(words.len());
+
+    let mut parts: Vec<String> = Vec::new();
+    if start_idx > 0 {
+        parts.push("...".to_string());
+    }
+
+    for &w in &words[start_idx..end_idx] {
+        let clean = w
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        if query_tokens
+            .iter()
+            .any(|q| clean == *q || (clean.len() >= 3 && clean.contains(q)))
+        {
+            parts.push(format!("<b>{w}</b>"));
+        } else {
+            parts.push(w.to_string());
+        }
+    }
+
+    if end_idx < words.len() {
+        parts.push("...".to_string());
+    }
+
+    parts.join(" ")
 }
 
 pub fn tokenize_words(s: &str) -> Vec<String> {
