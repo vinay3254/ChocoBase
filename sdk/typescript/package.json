@@ -1,0 +1,24 @@
+{
+  "name": "@chocobase/chocobase-js",
+  "version": "0.1.0",
+  "description": "Official TypeScript & JavaScript client SDK for ChocoBase (Supabase-compatible platform)",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test"
+  },
+  "keywords": [
+    "chocobase",
+    "supabase",
+    "database",
+    "auth",
+    "storage",
+    "realtime",
+    "graphql",
+    "client"
+  ],
+  "author": "ChocoBase Team",
+  "license": "MIT"
+}
