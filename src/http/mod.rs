@@ -16,11 +16,13 @@ use crate::types::value::Value;
 
 pub mod dashboard;
 pub mod functions;
+pub mod rate_limit;
 pub mod realtime_channels;
 pub mod storage;
 pub mod websocket;
 
 use crate::functions::FunctionRegistry;
+use rate_limit::RateLimiter;
 use realtime_channels::RealtimeChannelManager;
 
 pub struct HttpServer {
@@ -39,6 +41,7 @@ impl HttpServer {
 
         let functions_reg = Arc::new(FunctionRegistry::new());
         let realtime_mgr = Arc::new(RealtimeChannelManager::new());
+        let rate_limiter = Arc::new(RateLimiter::new());
         let webhook_mgr = Arc::new(crate::webhooks::WebhookManager::new());
         webhook_mgr.clone().start_dispatcher(db.subscribe());
         let branch_mgr = Arc::new(crate::branching::BranchManager::new(
@@ -54,11 +57,12 @@ impl HttpServer {
                                 let db_clone = Arc::clone(&db);
                                 let func_clone = Arc::clone(&functions_reg);
                                 let rt_clone = Arc::clone(&realtime_mgr);
+                                let rl_clone = Arc::clone(&rate_limiter);
                                 let wh_clone = Arc::clone(&webhook_mgr);
                                 let br_clone = Arc::clone(&branch_mgr);
                                 tokio::spawn(async move {
                                     let _ = handle_http_connection(
-                                        socket, db_clone, func_clone, rt_clone, wh_clone, br_clone,
+                                        socket, db_clone, func_clone, rt_clone, rl_clone, wh_clone, br_clone,
                                     )
                                     .await;
                                 });
@@ -108,6 +112,7 @@ async fn handle_http_connection(
     db: Arc<SharedDatabase>,
     functions_reg: Arc<FunctionRegistry>,
     realtime_mgr: Arc<RealtimeChannelManager>,
+    rate_limiter: Arc<RateLimiter>,
     webhook_mgr: Arc<crate::webhooks::WebhookManager>,
     branch_mgr: Arc<crate::branching::BranchManager>,
 ) -> std::io::Result<()> {
@@ -219,6 +224,77 @@ async fn handle_http_connection(
         return Ok(());
     }
 
+    let peer_ip = socket
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+
+    let (path, query_string) = match full_path.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (full_path.as_str(), ""),
+    };
+
+    let rate_limit_key = if let Some(t) = &auth_token {
+        format!("token:{t}")
+    } else {
+        format!("ip:{peer_ip}")
+    };
+
+    if path == "/v1/test/rate-limit" {
+        if let Err(retry_after) =
+            rate_limiter.check_rate_limit(&format!("test:{rate_limit_key}"), 2, 60)
+        {
+            let resp_json = serde_json::json!({
+                "error": "too many requests, rate limit exceeded",
+                "retry_after": retry_after
+            });
+            let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
+            let header = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {retry_after}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                resp_bytes.len()
+            );
+            socket.write_all(header.as_bytes()).await?;
+            socket.write_all(&resp_bytes).await?;
+            socket.flush().await?;
+            return Ok(());
+        }
+        let resp_json = serde_json::json!({ "status": "ok" });
+        let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            resp_bytes.len()
+        );
+        socket.write_all(header.as_bytes()).await?;
+        socket.write_all(&resp_bytes).await?;
+        socket.flush().await?;
+        return Ok(());
+    }
+
+    let is_auth_route = path.starts_with("/v1/auth") || path.starts_with("/auth");
+    let max_allowed = if is_auth_route { 30 } else { 200 };
+
+    if !path.starts_with("/v1/admin")
+        && !path.starts_with("/admin")
+        && path != "/health"
+        && path != "/metrics"
+    {
+        if let Err(retry_after) = rate_limiter.check_rate_limit(&rate_limit_key, max_allowed, 60) {
+            let resp_json = serde_json::json!({
+                "error": "too many requests, rate limit exceeded",
+                "retry_after": retry_after
+            });
+            let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
+            let header = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {retry_after}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                resp_bytes.len()
+            );
+            socket.write_all(header.as_bytes()).await?;
+            socket.write_all(&resp_bytes).await?;
+            socket.flush().await?;
+            return Ok(());
+        }
+    }
+
     let secret = crate::auth::jwt_secret();
     // Determine execution context from Authorization header (fail-closed: default to anonymous)
     let exec_ctx = if let Some(token) = auth_token {
@@ -239,11 +315,6 @@ async fn handle_http_connection(
         }
     } else {
         ExecutionContext::anonymous()
-    };
-
-    let (path, query_string) = match full_path.split_once('?') {
-        Some((p, q)) => (p, q),
-        None => (full_path.as_str(), ""),
     };
 
     if ws_upgrade
