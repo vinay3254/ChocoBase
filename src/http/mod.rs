@@ -339,66 +339,51 @@ async fn handle_http_connection(
 
     // Static asset serving for frontend (ChocoBase Studio React App)
     if method == "GET" {
-        let frontend_dist = std::path::Path::new("frontend/dist");
-        if frontend_dist.exists() {
-            let req_path = if path == "/" || path == "/dashboard" {
-                "index.html"
-            } else {
-                path.trim_start_matches('/')
-            };
-
-            let candidate = frontend_dist.join(req_path);
-            if candidate.exists() && candidate.is_file() {
-                if let Ok(file_bytes) = std::fs::read(&candidate) {
-                    let content_type = if req_path.ends_with(".html") {
-                        "text/html; charset=utf-8"
-                    } else if req_path.ends_with(".js") || req_path.ends_with(".mjs") {
-                        "application/javascript; charset=utf-8"
-                    } else if req_path.ends_with(".css") {
-                        "text/css; charset=utf-8"
-                    } else if req_path.ends_with(".json") {
-                        "application/json"
-                    } else if req_path.ends_with(".svg") {
-                        "image/svg+xml"
-                    } else if req_path.ends_with(".png") {
-                        "image/png"
-                    } else if req_path.ends_with(".ico") {
-                        "image/x-icon"
-                    } else {
-                        "application/octet-stream"
-                    };
-
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
-                        file_bytes.len()
-                    );
-                    socket.write_all(header.as_bytes()).await?;
-                    socket.write_all(&file_bytes).await?;
-                    socket.flush().await?;
-                    return Ok(());
-                }
-            } else if !path.starts_with("/v1/")
-                && !path.starts_with("/rest/")
-                && !path.starts_with("/graphql")
-                && !path.starts_with("/auth/")
-                && !path.starts_with("/storage/")
-            {
-                // Fallback to index.html for Single Page Application (SPA) client-side routes
-                let index_path = frontend_dist.join("index.html");
-                if let Ok(html_bytes) = std::fs::read(&index_path) {
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
-                        html_bytes.len()
-                    );
-                    socket.write_all(header.as_bytes()).await?;
-                    socket.write_all(&html_bytes).await?;
-                    socket.flush().await?;
-                    return Ok(());
-                }
-            }
-        } else if path == "/" || path == "/dashboard" {
+        if path == "/" || path == "/dashboard" {
             let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                dashboard::DASHBOARD_HTML.len()
+            );
+            socket.write_all(header.as_bytes()).await?;
+            socket
+                .write_all(dashboard::DASHBOARD_HTML.as_bytes())
+                .await?;
+            socket.flush().await?;
+            return Ok(());
+        }
+
+        if path.ends_with(".css") || path.contains("index-CsT9bNzu.css") {
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=utf-8\r\nCache-Control: public, max-age=31536000\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                dashboard::ASSET_CSS.len()
+            );
+            socket.write_all(header.as_bytes()).await?;
+            socket.write_all(dashboard::ASSET_CSS).await?;
+            socket.flush().await?;
+            return Ok(());
+        }
+
+        if path.ends_with(".js") || path.contains("index-D-C9egtQ.js") {
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/javascript; charset=utf-8\r\nCache-Control: public, max-age=31536000\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                dashboard::ASSET_JS.len()
+            );
+            socket.write_all(header.as_bytes()).await?;
+            socket.write_all(dashboard::ASSET_JS).await?;
+            socket.flush().await?;
+            return Ok(());
+        }
+
+        // SPA route fallback for client-side navigation
+        if !path.starts_with("/v1/")
+            && !path.starts_with("/rest/")
+            && !path.starts_with("/graphql")
+            && !path.starts_with("/auth/")
+            && !path.starts_with("/storage/")
+            && !path.starts_with("/assets/")
+        {
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 dashboard::DASHBOARD_HTML.len()
             );
             socket.write_all(header.as_bytes()).await?;
