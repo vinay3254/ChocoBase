@@ -149,6 +149,7 @@ async fn handle_http_connection(
     // Parse headers
     let mut auth_token = None;
     let mut origin_header = None;
+    let mut range_header = None;
     let mut content_length = 0usize;
 
     for line in lines {
@@ -161,6 +162,8 @@ async fn handle_http_connection(
                 }
             } else if k_trim.eq_ignore_ascii_case("origin") {
                 origin_header = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("range") {
+                range_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("content-length") {
                 content_length = v_trim.parse().unwrap_or(0);
             }
@@ -322,13 +325,25 @@ async fn handle_http_connection(
     }
 
     if path.starts_with("/v1/storage/") {
-        let (status_code, status_text, json_body, binary_data) =
-            storage::handle_storage_request(&db, &method, path, query_string, &body, &exec_ctx)
-                .await;
+        let (status_code, status_text, json_body, binary_data) = storage::handle_storage_request(
+            &db,
+            &method,
+            path,
+            query_string,
+            &body,
+            &exec_ctx,
+            range_header.as_deref(),
+        )
+        .await;
 
-        if let Some((bytes, content_type)) = binary_data {
+        if let Some((bytes, content_type, cr_opt, etag)) = binary_data {
+            let cr_header = if let Some(cr) = cr_opt {
+                format!("Content-Range: {cr}\r\n")
+            } else {
+                String::new()
+            };
             let header = format!(
-                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\nETag: {etag}\r\nAccept-Ranges: bytes\r\n{cr_header}{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 bytes.len()
             );
             socket.write_all(header.as_bytes()).await?;
