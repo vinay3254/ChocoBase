@@ -486,6 +486,34 @@ async fn handle_http_connection(
         .await
     } else if path.starts_with("/v1/webhooks") || path.starts_with("/admin/webhooks") {
         handle_webhooks_request(&webhook_mgr, &method, path, query_string, &body, &exec_ctx).await
+    } else if method == "GET" && path == "/health" {
+        (
+            200,
+            "OK",
+            serde_json::json!({
+                "status": "healthy",
+                "version": "0.1.0",
+                "engine": "ChocoBase"
+            }),
+        )
+    } else if method == "GET" && path == "/metrics" {
+        let metrics_text = crate::metrics::MetricsRegistry::global().render_prometheus();
+        (200, "OK", serde_json::Value::String(metrics_text))
+    } else if method == "GET" && (path == "/.well-known/jwks.json" || path == "/v1/auth/keys") {
+        (
+            200,
+            "OK",
+            serde_json::json!({
+                "keys": [
+                    {
+                        "kty": "oct",
+                        "kid": "k1",
+                        "alg": "HS256",
+                        "use": "sig"
+                    }
+                ]
+            }),
+        )
     } else if path.starts_with("/v1/branches") || path.starts_with("/admin/branches") {
         handle_branches_request(
             &branch_mgr,
@@ -509,11 +537,28 @@ async fn handle_http_connection(
         )
     };
 
-    let body_bytes = serde_json::to_vec(&json_body).unwrap_or_default();
+    crate::metrics::MetricsRegistry::global().record_http_request(status_code);
+
+    let (content_type, body_bytes) = if path == "/metrics" {
+        (
+            "text/plain; version=0.0.4; charset=utf-8",
+            match &json_body {
+                serde_json::Value::String(s) => s.as_bytes().to_vec(),
+                _ => vec![],
+            },
+        )
+    } else {
+        (
+            "application/json",
+            serde_json::to_vec(&json_body).unwrap_or_default(),
+        )
+    };
+
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\n{cors_headers}X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{cors_headers}X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status_code,
         status_text,
+        content_type,
         body_bytes.len()
     );
 
