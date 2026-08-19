@@ -719,6 +719,20 @@ async fn handle_webhooks_request(
         );
     }
 
+    if path == "/v1/webhooks/dlq" || path == "/admin/webhooks/dlq" {
+        if method == "GET" {
+            let dlq = webhook_mgr.list_dead_letter_queue().await;
+            return (200, "OK", serde_json::json!({ "dead_letter_queue": dlq }));
+        } else if method == "DELETE" {
+            webhook_mgr.clear_dead_letter_queue().await;
+            return (
+                200,
+                "OK",
+                serde_json::json!({ "message": "dead letter queue cleared" }),
+            );
+        }
+    }
+
     if method == "GET" {
         let list = webhook_mgr.list_webhooks().await;
         (200, "OK", serde_json::json!({ "webhooks": list }))
