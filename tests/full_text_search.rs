@@ -99,3 +99,38 @@ fn test_full_text_search_ranking_and_ordering() {
         other => panic!("unexpected result: {other:?}"),
     }
 }
+
+#[test]
+fn test_full_text_search_snippet_highlighting() {
+    let file = NamedTempFile::new().unwrap();
+    let mut db = Database::create(file.path()).unwrap();
+
+    db.execute("CREATE TABLE articles (id INTEGER PRIMARY KEY, content TEXT)")
+        .unwrap();
+
+    db.execute(
+        "INSERT INTO articles (id, content) VALUES \
+         (1, 'ChocoBase implements a high performance database engine with real-time websocket subscriptions.')",
+    )
+    .unwrap();
+
+    let res = db
+        .execute("SELECT id, FTS_SNIPPET(content, 'database engine') AS snippet FROM articles WHERE FTS_MATCH(content, 'database')")
+        .unwrap();
+
+    match res {
+        ExecResult::Rows { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Integer(1));
+            if let Value::Text(snippet) = &rows[0][1] {
+                assert!(
+                    snippet.contains("<b>database</b>") && snippet.contains("<b>engine</b>"),
+                    "snippet must contain highlighted tags: {snippet}"
+                );
+            } else {
+                panic!("expected text snippet");
+            }
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
