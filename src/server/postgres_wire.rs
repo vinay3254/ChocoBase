@@ -160,12 +160,24 @@ async fn handle_postgres_session_with_lenbuf(
     // Send AuthenticationOk ('R', len 8, code 0)
     write_auth_ok(socket).await?;
 
+    // Send BackendKeyData ('K', len 12, pid, secret)
+    let pid = (1000 + exec_ctx.user_id.unwrap_or(1)) as i32;
+    write_backend_key_data(socket, pid, 424242).await?;
+
     // Send standard ParameterStatus ('S')
     write_parameter_status(socket, "server_version", "15.0 (ChocoBase)").await?;
     write_parameter_status(socket, "client_encoding", "UTF8").await?;
     write_parameter_status(socket, "server_encoding", "UTF8").await?;
     write_parameter_status(socket, "DateStyle", "ISO, MDY").await?;
+    write_parameter_status(socket, "integer_datetimes", "on").await?;
     write_parameter_status(socket, "standard_conforming_strings", "on").await?;
+    write_parameter_status(socket, "session_authorization", &safe_user).await?;
+    write_parameter_status(
+        socket,
+        "is_superuser",
+        if exec_ctx.is_admin { "on" } else { "off" },
+    )
+    .await?;
 
     // Send ReadyForQuery ('Z', len 5, 'I')
     write_ready_for_query(socket, b'I').await?;
@@ -452,6 +464,17 @@ async fn execute_and_reply_query(
 
 async fn write_auth_ok(writer: &mut TcpStream) -> io::Result<()> {
     writer.write_all(b"R\x00\x00\x00\x08\x00\x00\x00\x00").await
+}
+
+async fn write_backend_key_data(
+    writer: &mut TcpStream,
+    process_id: i32,
+    secret_key: i32,
+) -> io::Result<()> {
+    writer.write_all(b"K").await?;
+    writer.write_all(&12u32.to_be_bytes()).await?;
+    writer.write_all(&process_id.to_be_bytes()).await?;
+    writer.write_all(&secret_key.to_be_bytes()).await
 }
 
 async fn write_parameter_status(writer: &mut TcpStream, name: &str, val: &str) -> io::Result<()> {
