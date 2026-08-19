@@ -172,6 +172,9 @@ async fn handle_postgres_session_with_lenbuf(
     socket.flush().await?;
 
     // 4. Query execution loop using authenticated execution context
+    let mut prepared_statements: HashMap<String, (String, Vec<u32>)> = HashMap::new();
+    let mut portals: HashMap<String, String> = HashMap::new();
+
     loop {
         let mut msg_type_buf = [0u8; 1];
         match socket.read_exact(&mut msg_type_buf).await {
@@ -198,72 +201,166 @@ async fn handle_postgres_session_with_lenbuf(
                     // EmptyQueryResponse ('I', len 4)
                     socket.write_all(b"I\x00\x00\x00\x04").await?;
                 } else {
-                    // Normalize standard pg driver discovery queries
-                    let trimmed_sql = sql.trim_end_matches(';').trim();
-                    if trimmed_sql.eq_ignore_ascii_case("SELECT 1")
-                        || trimmed_sql.eq_ignore_ascii_case("SELECT 1 AS one")
-                    {
-                        write_row_description(socket, &["one".to_string()]).await?;
-                        write_data_row(socket, &[Value::Integer(1)]).await?;
-                        write_command_complete(socket, "SELECT 1").await?;
-                    } else {
-                        match db.execute_with_context(&sql, &exec_ctx) {
-                            Ok(ExecResult::Rows { columns, rows }) => {
-                                write_row_description(socket, &columns).await?;
-                                for row in &rows {
-                                    write_data_row(socket, row).await?;
-                                }
-                                write_command_complete(socket, &format!("SELECT {}", rows.len()))
-                                    .await?;
-                            }
-                            Ok(ExecResult::Modified(count)) => {
-                                let tag = if sql.trim_start().to_uppercase().starts_with("INSERT") {
-                                    format!("INSERT 0 {count}")
-                                } else if sql.trim_start().to_uppercase().starts_with("UPDATE") {
-                                    format!("UPDATE {count}")
-                                } else if sql.trim_start().to_uppercase().starts_with("DELETE") {
-                                    format!("DELETE {count}")
-                                } else {
-                                    format!("SET {count}")
-                                };
-                                write_command_complete(socket, &tag).await?;
-                            }
-                            Ok(ExecResult::Ok) => {
-                                let tag = if sql
-                                    .trim_start()
-                                    .to_uppercase()
-                                    .starts_with("CREATE TABLE")
-                                {
-                                    "CREATE TABLE"
-                                } else if sql.trim_start().to_uppercase().starts_with("DROP TABLE")
-                                {
-                                    "DROP TABLE"
-                                } else if sql
-                                    .trim_start()
-                                    .to_uppercase()
-                                    .starts_with("CREATE INDEX")
-                                {
-                                    "CREATE INDEX"
-                                } else if sql.trim_start().to_uppercase().starts_with("BEGIN") {
-                                    "BEGIN"
-                                } else if sql.trim_start().to_uppercase().starts_with("COMMIT") {
-                                    "COMMIT"
-                                } else if sql.trim_start().to_uppercase().starts_with("ROLLBACK") {
-                                    "ROLLBACK"
-                                } else {
-                                    "OK"
-                                };
-                                write_command_complete(socket, tag).await?;
-                            }
-                            Err(err) => {
-                                write_error_response(socket, "42601", &err.to_string()).await?;
-                            }
-                        }
-                    }
+                    execute_and_reply_query(socket, &db, &sql, &exec_ctx).await?;
                 }
 
                 write_ready_for_query(socket, b'I').await?;
                 socket.flush().await?;
+            }
+            b'P' => {
+                // Parse ('P'): [name\0, query\0, num_params(u16), [param_oid(u32)]]
+                let mut offset = 0;
+                let stmt_name = read_cstring(&msg_body, &mut offset);
+                let query = read_cstring(&msg_body, &mut offset);
+
+                let mut param_oids = Vec::new();
+                if offset + 2 <= msg_body.len() {
+                    let num_params =
+                        u16::from_be_bytes([msg_body[offset], msg_body[offset + 1]]) as usize;
+                    offset += 2;
+                    for _ in 0..num_params {
+                        if offset + 4 <= msg_body.len() {
+                            let oid = u32::from_be_bytes([
+                                msg_body[offset],
+                                msg_body[offset + 1],
+                                msg_body[offset + 2],
+                                msg_body[offset + 3],
+                            ]);
+                            param_oids.push(oid);
+                            offset += 4;
+                        }
+                    }
+                }
+
+                prepared_statements.insert(stmt_name, (query, param_oids));
+                // ParseComplete ('1', len 4)
+                socket.write_all(b"1\x00\x00\x00\x04").await?;
+            }
+            b'B' => {
+                // Bind ('B'): [portal_name\0, stmt_name\0, num_format_codes(u16), ... params, ...]
+                let mut offset = 0;
+                let portal_name = read_cstring(&msg_body, &mut offset);
+                let stmt_name = read_cstring(&msg_body, &mut offset);
+
+                let raw_query = prepared_statements
+                    .get(&stmt_name)
+                    .map(|(q, _)| q.clone())
+                    .unwrap_or_else(|| stmt_name.clone());
+
+                // Read format codes
+                if offset + 2 <= msg_body.len() {
+                    let num_formats =
+                        u16::from_be_bytes([msg_body[offset], msg_body[offset + 1]]) as usize;
+                    offset += 2 + (num_formats * 2);
+                }
+
+                // Read parameters and substitute $1, $2, ...
+                let mut bound_sql = raw_query;
+                if offset + 2 <= msg_body.len() {
+                    let num_params =
+                        u16::from_be_bytes([msg_body[offset], msg_body[offset + 1]]) as usize;
+                    offset += 2;
+
+                    for i in 1..=num_params {
+                        if offset + 4 <= msg_body.len() {
+                            let param_len = i32::from_be_bytes([
+                                msg_body[offset],
+                                msg_body[offset + 1],
+                                msg_body[offset + 2],
+                                msg_body[offset + 3],
+                            ]);
+                            offset += 4;
+
+                            let param_val = if param_len == -1 {
+                                "NULL".to_string()
+                            } else if param_len >= 0
+                                && offset + (param_len as usize) <= msg_body.len()
+                            {
+                                let val_bytes = &msg_body[offset..offset + (param_len as usize)];
+                                offset += param_len as usize;
+                                let s = String::from_utf8_lossy(val_bytes);
+                                if s.parse::<i64>().is_ok() || s.parse::<f64>().is_ok() {
+                                    s.to_string()
+                                } else {
+                                    format!("'{}'", s.replace('\'', "''"))
+                                }
+                            } else {
+                                "NULL".to_string()
+                            };
+
+                            let placeholder = format!("${i}");
+                            bound_sql = bound_sql.replace(&placeholder, &param_val);
+                        }
+                    }
+                }
+
+                portals.insert(portal_name, bound_sql);
+                // BindComplete ('2', len 4)
+                socket.write_all(b"2\x00\x00\x00\x04").await?;
+            }
+            b'D' => {
+                // Describe ('D'): [type(u8), name\0]
+                if !msg_body.is_empty() {
+                    let desc_type = msg_body[0];
+                    let mut offset = 1;
+                    let name = read_cstring(&msg_body, &mut offset);
+
+                    if desc_type == b'S' {
+                        // ParameterDescription ('t')
+                        let params_count = prepared_statements
+                            .get(&name)
+                            .map(|(_, p)| p.len() as u16)
+                            .unwrap_or(0);
+                        let mut param_payload = Vec::new();
+                        param_payload.extend_from_slice(&params_count.to_be_bytes());
+                        if let Some((_, oids)) = prepared_statements.get(&name) {
+                            for oid in oids {
+                                param_payload.extend_from_slice(&oid.to_be_bytes());
+                            }
+                        }
+                        let len = (param_payload.len() + 4) as u32;
+                        socket.write_all(b"t").await?;
+                        socket.write_all(&len.to_be_bytes()).await?;
+                        socket.write_all(&param_payload).await?;
+                    }
+
+                    // Send NoData ('n', len 4) for generic describe
+                    socket.write_all(b"n\x00\x00\x00\x04").await?;
+                }
+            }
+            b'E' => {
+                // Execute ('E'): [portal_name\0, max_rows(u32)]
+                let mut offset = 0;
+                let portal_name = read_cstring(&msg_body, &mut offset);
+                if let Some(sql) = portals.get(&portal_name) {
+                    execute_and_reply_query(socket, &db, sql, &exec_ctx).await?;
+                } else {
+                    write_command_complete(socket, "OK").await?;
+                }
+            }
+            b'S' => {
+                // Sync ('S')
+                write_ready_for_query(socket, b'I').await?;
+                socket.flush().await?;
+            }
+            b'H' => {
+                // Flush ('H')
+                socket.flush().await?;
+            }
+            b'C' => {
+                // Close ('C'): [type(u8), name\0]
+                if !msg_body.is_empty() {
+                    let close_type = msg_body[0];
+                    let mut offset = 1;
+                    let name = read_cstring(&msg_body, &mut offset);
+                    if close_type == b'S' {
+                        prepared_statements.remove(&name);
+                    } else if close_type == b'P' {
+                        portals.remove(&name);
+                    }
+                    // CloseComplete ('3', len 4)
+                    socket.write_all(b"3\x00\x00\x00\x04").await?;
+                }
             }
             b'X' => {
                 // Terminate
@@ -277,6 +374,79 @@ async fn handle_postgres_session_with_lenbuf(
         }
     }
 
+    Ok(())
+}
+
+fn read_cstring(buf: &[u8], offset: &mut usize) -> String {
+    let start = *offset;
+    while *offset < buf.len() && buf[*offset] != 0 {
+        *offset += 1;
+    }
+    let s = String::from_utf8_lossy(&buf[start..*offset]).to_string();
+    if *offset < buf.len() && buf[*offset] == 0 {
+        *offset += 1;
+    }
+    s
+}
+
+async fn execute_and_reply_query(
+    socket: &mut TcpStream,
+    db: &SharedDatabase,
+    sql: &str,
+    exec_ctx: &ExecutionContext,
+) -> io::Result<()> {
+    let trimmed_sql = sql.trim_end_matches(';').trim();
+    if trimmed_sql.eq_ignore_ascii_case("SELECT 1")
+        || trimmed_sql.eq_ignore_ascii_case("SELECT 1 AS one")
+    {
+        write_row_description(socket, &["one".to_string()]).await?;
+        write_data_row(socket, &[Value::Integer(1)]).await?;
+        write_command_complete(socket, "SELECT 1").await?;
+        return Ok(());
+    }
+
+    match db.execute_with_context(sql, exec_ctx) {
+        Ok(ExecResult::Rows { columns, rows }) => {
+            write_row_description(socket, &columns).await?;
+            for row in &rows {
+                write_data_row(socket, row).await?;
+            }
+            write_command_complete(socket, &format!("SELECT {}", rows.len())).await?;
+        }
+        Ok(ExecResult::Modified(count)) => {
+            let tag = if sql.trim_start().to_uppercase().starts_with("INSERT") {
+                format!("INSERT 0 {count}")
+            } else if sql.trim_start().to_uppercase().starts_with("UPDATE") {
+                format!("UPDATE {count}")
+            } else if sql.trim_start().to_uppercase().starts_with("DELETE") {
+                format!("DELETE {count}")
+            } else {
+                format!("SET {count}")
+            };
+            write_command_complete(socket, &tag).await?;
+        }
+        Ok(ExecResult::Ok) => {
+            let tag = if sql.trim_start().to_uppercase().starts_with("CREATE TABLE") {
+                "CREATE TABLE"
+            } else if sql.trim_start().to_uppercase().starts_with("DROP TABLE") {
+                "DROP TABLE"
+            } else if sql.trim_start().to_uppercase().starts_with("CREATE INDEX") {
+                "CREATE INDEX"
+            } else if sql.trim_start().to_uppercase().starts_with("BEGIN") {
+                "BEGIN"
+            } else if sql.trim_start().to_uppercase().starts_with("COMMIT") {
+                "COMMIT"
+            } else if sql.trim_start().to_uppercase().starts_with("ROLLBACK") {
+                "ROLLBACK"
+            } else {
+                "OK"
+            };
+            write_command_complete(socket, tag).await?;
+        }
+        Err(err) => {
+            write_error_response(socket, "42601", &err.to_string()).await?;
+        }
+    }
     Ok(())
 }
 
