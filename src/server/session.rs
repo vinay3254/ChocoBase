@@ -92,11 +92,11 @@ where
                 event_res = rx.recv() => {
                     match event_res {
                         Ok(event) => {
-                            let matches = match table_filter {
+                            let table_matches = match table_filter {
                                 Some(tbl) => &event.table == tbl,
                                 None => true,
                             };
-                            if matches {
+                            if table_matches && check_event_rls(&db, &event, &exec_ctx) {
                                 write_response(&mut writer, &Response::Event(event)).await?;
                             }
                         }
@@ -204,4 +204,37 @@ fn handle_token_auth(token: &str, ctx: &mut ExecutionContext) -> Response {
         }
         Err(_) => Response::Error("invalid or expired token".to_string()),
     }
+}
+
+fn check_event_rls(
+    db: &SharedDatabase,
+    event: &crate::server::protocol::ChangeEvent,
+    ctx: &ExecutionContext,
+) -> bool {
+    if ctx.is_admin {
+        return true;
+    }
+    let schema = match db.table_schema(&event.table) {
+        Some(s) => s,
+        None => return true,
+    };
+    if !schema.rls_enabled {
+        return true;
+    }
+    if !ctx.is_authenticated() {
+        return false;
+    }
+
+    let row = event.new_row.as_ref().or(event.old_row.as_ref());
+    if let Some(r) = row {
+        if let Some(user_idx) = schema.column_index("user_id") {
+            if let Some(Value::Integer(uid)) = r.get(user_idx) {
+                if Some(*uid) != ctx.user_id {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
 }
