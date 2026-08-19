@@ -42,7 +42,18 @@ impl LockManager {
         }
     }
 
-    fn acquire(&self, tx_id: u64, resource: &str, mode: LockMode) {
+    pub fn acquire(&self, tx_id: u64, resource: &str, mode: LockMode) {
+        let _ = self.acquire_timeout(tx_id, resource, mode, std::time::Duration::from_secs(30));
+    }
+
+    pub fn acquire_timeout(
+        &self,
+        tx_id: u64,
+        resource: &str,
+        mode: LockMode,
+        timeout: std::time::Duration,
+    ) -> Result<(), crate::error::StorageError> {
+        let start = std::time::Instant::now();
         let mut state = self.state.lock().unwrap();
         loop {
             let owners = state.owners.get(resource).cloned().unwrap_or_default();
@@ -55,9 +66,31 @@ impl LockManager {
                     .entry(resource.to_string())
                     .or_default()
                     .push((tx_id, mode));
-                return;
+                return Ok(());
             }
-            state = self.changed.wait(state).unwrap();
+
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(crate::error::StorageError::LockTimeout);
+            }
+            let remaining = timeout - elapsed;
+            let (new_state, timeout_res) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = new_state;
+            if timeout_res.timed_out() {
+                let owners_check = state.owners.get(resource).cloned().unwrap_or_default();
+                let compatible_check = owners_check.iter().all(|(owner, held)| {
+                    *owner == tx_id || matches!((mode, *held), (LockMode::Shared, LockMode::Shared))
+                });
+                if compatible_check {
+                    state
+                        .owners
+                        .entry(resource.to_string())
+                        .or_default()
+                        .push((tx_id, mode));
+                    return Ok(());
+                }
+                return Err(crate::error::StorageError::LockTimeout);
+            }
         }
     }
 
@@ -97,10 +130,32 @@ impl LockToken {
         self.held.lock().unwrap().push(resource.to_string());
     }
 
+    pub fn try_shared(
+        &self,
+        resource: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), crate::error::StorageError> {
+        self.manager
+            .acquire_timeout(self.tx_id, resource, LockMode::Shared, timeout)?;
+        self.held.lock().unwrap().push(resource.to_string());
+        Ok(())
+    }
+
     pub fn exclusive(&self, resource: &str) {
         self.manager
             .acquire(self.tx_id, resource, LockMode::Exclusive);
         self.held.lock().unwrap().push(resource.to_string());
+    }
+
+    pub fn try_exclusive(
+        &self,
+        resource: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), crate::error::StorageError> {
+        self.manager
+            .acquire_timeout(self.tx_id, resource, LockMode::Exclusive, timeout)?;
+        self.held.lock().unwrap().push(resource.to_string());
+        Ok(())
     }
 }
 
@@ -171,5 +226,20 @@ mod tests {
         drop(a);
         handle.join().unwrap();
         assert!(acquired.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn conflicting_lock_times_out_and_avoids_deadlock() {
+        let lm = LockManager::new();
+        let a = lm.begin();
+        a.exclusive("table_orders");
+
+        let b = lm.begin();
+        let res = b.try_exclusive("table_orders", std::time::Duration::from_millis(50));
+        assert!(matches!(res, Err(crate::error::StorageError::LockTimeout)));
+
+        drop(a);
+        let res_after = b.try_exclusive("table_orders", std::time::Duration::from_millis(50));
+        assert!(res_after.is_ok());
     }
 }
