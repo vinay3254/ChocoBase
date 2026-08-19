@@ -19,9 +19,11 @@ type HmacSha256 = Hmac<Sha256>;
 pub fn ensure_storage_tables(db: &SharedDatabase) {
     let buckets_sql = "CREATE TABLE _storage_buckets (id TEXT PRIMARY KEY, name TEXT NOT NULL, public BOOLEAN NOT NULL, created_at INTEGER NOT NULL)";
     let objects_sql = "CREATE TABLE _storage_objects (id TEXT PRIMARY KEY, bucket_id TEXT NOT NULL, name TEXT NOT NULL, owner_id INTEGER, content_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, metadata JSON, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)";
+    let lifecycle_sql = "CREATE TABLE _storage_lifecycle_rules (id TEXT PRIMARY KEY, bucket_id TEXT NOT NULL, prefix TEXT NOT NULL, expiry_days INTEGER NOT NULL, created_at INTEGER NOT NULL)";
 
     let _ = db.execute_with_context(buckets_sql, &ExecutionContext::admin());
     let _ = db.execute_with_context(objects_sql, &ExecutionContext::admin());
+    let _ = db.execute_with_context(lifecycle_sql, &ExecutionContext::admin());
 }
 
 pub fn get_storage_root() -> PathBuf {
@@ -404,51 +406,148 @@ pub async fn handle_storage_request(
             ),
         }
     } else if let Some(stripped) = subpath.strip_prefix("/bucket/") {
-        let bucket_id = sanitize_object_path(stripped);
-        match method {
-            "GET" => {
-                let sql = format!("SELECT id, name, public, created_at FROM _storage_buckets WHERE id = '{bucket_id}'");
-                match db.execute_with_context(&sql, ctx) {
-                    Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
-                        let r = &rows[0];
-                        (
-                            200,
-                            "OK",
+        if let Some((bucket_id, "lifecycle")) = stripped.split_once('/') {
+            let bucket_id = sanitize_object_path(bucket_id);
+            if !ctx.is_admin {
+                return (
+                    403,
+                    "Forbidden",
+                    serde_json::json!({ "error": "admin privileges required for lifecycle rules" }),
+                    None,
+                );
+            }
+            match method {
+                "POST" => {
+                    let payload: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+                    let prefix = payload
+                        .get("prefix")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let expiry_days = payload
+                        .get("expiry_days")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(30);
+                    let rule_id = format!("{bucket_id}_{prefix}_{expiry_days}");
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
+                    let esc_id = rule_id.replace('\'', "''");
+                    let esc_bucket = bucket_id.replace('\'', "''");
+                    let esc_prefix = prefix.replace('\'', "''");
+                    let insert_sql = format!(
+                        "INSERT INTO _storage_lifecycle_rules (id, bucket_id, prefix, expiry_days, created_at) VALUES ('{esc_id}', '{esc_bucket}', '{esc_prefix}', {expiry_days}, {now})"
+                    );
+                    match db.execute_with_context(&insert_sql, &ExecutionContext::admin()) {
+                        Ok(_) => (
+                            201,
+                            "Created",
                             serde_json::json!({
-                                "id": match &r[0] { Value::Text(s) => s, _ => "" },
-                                "name": match &r[1] { Value::Text(s) => s, _ => "" },
-                                "public": match &r[2] { Value::Boolean(b) => *b, _ => false },
-                                "created_at": match &r[3] { Value::Integer(i) => *i, _ => 0 },
+                                "id": rule_id,
+                                "bucket_id": bucket_id,
+                                "prefix": prefix,
+                                "expiry_days": expiry_days
                             }),
                             None,
-                        )
+                        ),
+                        Err(e) => (
+                            400,
+                            "Bad Request",
+                            serde_json::json!({ "error": e.to_string() }),
+                            None,
+                        ),
                     }
-                    _ => (
-                        404,
-                        "Not Found",
-                        serde_json::json!({ "error": "bucket not found" }),
-                        None,
-                    ),
                 }
-            }
-            "DELETE" => {
-                let sql = format!("DELETE FROM _storage_buckets WHERE id = '{bucket_id}'");
-                let _ = db.execute_with_context(&sql, ctx);
-                let root = get_storage_root().join(&bucket_id);
-                let _ = fs::remove_dir_all(&root);
-                (
-                    200,
-                    "OK",
-                    serde_json::json!({ "message": "bucket deleted" }),
+                "GET" => {
+                    let esc_bucket = bucket_id.replace('\'', "''");
+                    let sql = format!(
+                        "SELECT id, prefix, expiry_days, created_at FROM _storage_lifecycle_rules WHERE bucket_id = '{esc_bucket}'"
+                    );
+                    let rules = match db.execute_with_context(&sql, &ExecutionContext::admin()) {
+                        Ok(ExecResult::Rows { rows, .. }) => rows
+                            .iter()
+                            .map(|r| {
+                                serde_json::json!({
+                                    "id": match &r[0] { Value::Text(s) => s, _ => "" },
+                                    "prefix": match &r[1] { Value::Text(s) => s, _ => "" },
+                                    "expiry_days": match &r[2] { Value::Integer(i) => *i, _ => 0 },
+                                    "created_at": match &r[3] { Value::Integer(i) => *i, _ => 0 }
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                        _ => vec![],
+                    };
+                    (200, "OK", serde_json::Value::Array(rules), None)
+                }
+                "DELETE" => {
+                    let esc_bucket = bucket_id.replace('\'', "''");
+                    let sql = format!(
+                        "DELETE FROM _storage_lifecycle_rules WHERE bucket_id = '{esc_bucket}'"
+                    );
+                    let _ = db.execute_with_context(&sql, &ExecutionContext::admin());
+                    (
+                        200,
+                        "OK",
+                        serde_json::json!({ "message": "lifecycle rules cleared" }),
+                        None,
+                    )
+                }
+                _ => (
+                    405,
+                    "Method Not Allowed",
+                    serde_json::json!({ "error": "method not allowed" }),
                     None,
-                )
+                ),
             }
-            _ => (
-                405,
-                "Method Not Allowed",
-                serde_json::json!({ "error": "method not allowed" }),
-                None,
-            ),
+        } else {
+            let bucket_id = sanitize_object_path(stripped);
+            match method {
+                "GET" => {
+                    let sql = format!("SELECT id, name, public, created_at FROM _storage_buckets WHERE id = '{bucket_id}'");
+                    match db.execute_with_context(&sql, ctx) {
+                        Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
+                            let r = &rows[0];
+                            (
+                                200,
+                                "OK",
+                                serde_json::json!({
+                                    "id": match &r[0] { Value::Text(s) => s, _ => "" },
+                                    "name": match &r[1] { Value::Text(s) => s, _ => "" },
+                                    "public": match &r[2] { Value::Boolean(b) => *b, _ => false },
+                                    "created_at": match &r[3] { Value::Integer(i) => *i, _ => 0 },
+                                }),
+                                None,
+                            )
+                        }
+                        _ => (
+                            404,
+                            "Not Found",
+                            serde_json::json!({ "error": "bucket not found" }),
+                            None,
+                        ),
+                    }
+                }
+                "DELETE" => {
+                    let sql = format!("DELETE FROM _storage_buckets WHERE id = '{bucket_id}'");
+                    let _ = db.execute_with_context(&sql, ctx);
+                    let root = get_storage_root().join(&bucket_id);
+                    let _ = fs::remove_dir_all(&root);
+                    (
+                        200,
+                        "OK",
+                        serde_json::json!({ "message": "bucket deleted" }),
+                        None,
+                    )
+                }
+                _ => (
+                    405,
+                    "Method Not Allowed",
+                    serde_json::json!({ "error": "method not allowed" }),
+                    None,
+                ),
+            }
         }
     } else if let Some(stripped) = subpath.strip_prefix("/object/list/") {
         let bucket_id = sanitize_object_path(stripped);
@@ -779,4 +878,68 @@ pub async fn handle_storage_request(
             None,
         )
     }
+}
+
+pub fn cleanup_expired_objects(db: &SharedDatabase) -> usize {
+    ensure_storage_tables(db);
+    let rules_sql = "SELECT bucket_id, prefix, expiry_days FROM _storage_lifecycle_rules";
+    let rules = match db.execute_with_context(rules_sql, &ExecutionContext::admin()) {
+        Ok(ExecResult::Rows { rows, .. }) => rows,
+        _ => return 0,
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut deleted_count = 0;
+
+    for rule in rules {
+        let bucket_id = match &rule[0] {
+            Value::Text(s) => s.as_str(),
+            _ => continue,
+        };
+        let prefix = match &rule[1] {
+            Value::Text(s) => s.as_str(),
+            _ => "",
+        };
+        let expiry_days = match &rule[2] {
+            Value::Integer(i) => *i as u64,
+            _ => continue,
+        };
+
+        let cutoff = now.saturating_sub(expiry_days * 86400);
+
+        let esc_bucket = bucket_id.replace('\'', "''");
+        let obj_sql = format!(
+            "SELECT id, name FROM _storage_objects WHERE bucket_id = '{esc_bucket}' AND created_at < {cutoff}"
+        );
+
+        if let Ok(ExecResult::Rows { rows, .. }) =
+            db.execute_with_context(&obj_sql, &ExecutionContext::admin())
+        {
+            for obj in rows {
+                let obj_id = match &obj[0] {
+                    Value::Text(s) => s.as_str(),
+                    _ => continue,
+                };
+                let name = match &obj[1] {
+                    Value::Text(s) => s.as_str(),
+                    _ => continue,
+                };
+
+                if name.starts_with(prefix) {
+                    let file_path = get_storage_root().join(bucket_id).join(name);
+                    let _ = fs::remove_file(file_path);
+                    let esc_obj_id = obj_id.replace('\'', "''");
+                    let del_sql = format!("DELETE FROM _storage_objects WHERE id = '{esc_obj_id}'");
+                    let _ = db.execute_with_context(&del_sql, &ExecutionContext::admin());
+                    deleted_count += 1;
+                }
+            }
+        }
+    }
+
+    deleted_count
 }
