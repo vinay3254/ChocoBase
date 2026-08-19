@@ -2,4 +2,4 @@
 
 pub const DASHBOARD_HTML: &str = include_str!("../../frontend/dist/index.html");
 pub const ASSET_CSS: &[u8] = include_bytes!("../../frontend/dist/assets/index-BNjWxeMV.css");
-pub const ASSET_JS: &[u8] = include_bytes!("../../frontend/dist/assets/index-B8H_XyMA.js");
+pub const ASSET_JS: &[u8] = include_bytes!("../../frontend/dist/assets/index-BXbiiPKI.js");
