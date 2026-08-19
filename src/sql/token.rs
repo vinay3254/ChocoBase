@@ -75,6 +75,7 @@ pub enum Token {
     InnerProduct,
     FtsMatch,
     FtsRank,
+    FtsSnippet,
     Explain,
     In,
     Exists,
