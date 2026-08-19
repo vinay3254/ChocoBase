@@ -486,6 +486,21 @@ async fn handle_http_connection(
         .await
     } else if path.starts_with("/v1/webhooks") || path.starts_with("/admin/webhooks") {
         handle_webhooks_request(&webhook_mgr, &method, path, query_string, &body, &exec_ctx).await
+    } else if method == "POST" && (path == "/v1/graphql" || path == "/graphql") {
+        let gql_req: crate::graphql::GraphQLRequest = match serde_json::from_str(&body) {
+            Ok(req) => req,
+            Err(_) => crate::graphql::GraphQLRequest {
+                query: body.clone(),
+                variables: None,
+                operation_name: None,
+            },
+        };
+        let gql_resp = crate::graphql::execute_graphql(&db, &gql_req, &exec_ctx).await;
+        (
+            200,
+            "OK",
+            serde_json::to_value(&gql_resp).unwrap_or_else(|_| serde_json::json!({})),
+        )
     } else if method == "GET" && path == "/health" {
         (
             200,
