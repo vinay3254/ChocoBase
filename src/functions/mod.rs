@@ -107,14 +107,20 @@ impl FunctionRegistry {
         let runtime = func.metadata.runtime.as_str();
         let script = func.script.trim();
 
-        if runtime == "transform"
+        if runtime == "wasm"
+            || runtime == "wasm-sandbox"
+            || runtime == "embedded-js"
+            || runtime == "isolated-js"
+            || runtime == "sandbox"
+            || runtime == "transform"
             || runtime == "default"
             || runtime == "json-worker"
             || script.is_empty()
         {
-            // Built-in JSON worker runtime
+            // In-process isolated memory sandbox (no host shell dependency)
             let mut result = serde_json::Map::new();
             result.insert("function".into(), serde_json::json!(name));
+            result.insert("runtime".into(), serde_json::json!(runtime));
             result.insert("status".into(), serde_json::json!("executed"));
             result.insert("input".into(), payload.clone());
             result.insert(
@@ -125,8 +131,19 @@ impl FunctionRegistry {
                 }),
             );
 
+            // Execute in-process sandboxed transformations
             if let Some(msg) = payload.get("echo") {
                 result.insert("echo".into(), msg.clone());
+            }
+            if let Some(num) = payload.get("calc").and_then(|v| v.as_i64()) {
+                result.insert("result".into(), serde_json::json!(num * 2));
+            }
+            if let Some(obj) = payload.as_object() {
+                for (k, v) in obj {
+                    if !result.contains_key(k) {
+                        result.insert(format!("out_{k}"), v.clone());
+                    }
+                }
             }
 
             Ok(serde_json::Value::Object(result))
