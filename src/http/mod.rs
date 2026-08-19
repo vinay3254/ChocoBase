@@ -40,6 +40,9 @@ impl HttpServer {
         let realtime_mgr = Arc::new(RealtimeChannelManager::new());
         let webhook_mgr = Arc::new(crate::webhooks::WebhookManager::new());
         webhook_mgr.clone().start_dispatcher(db.subscribe());
+        let branch_mgr = Arc::new(crate::branching::BranchManager::new(
+            std::env::temp_dir().join("chocobase_branches"),
+        ));
 
         tokio::spawn(async move {
             loop {
@@ -51,8 +54,12 @@ impl HttpServer {
                                 let func_clone = Arc::clone(&functions_reg);
                                 let rt_clone = Arc::clone(&realtime_mgr);
                                 let wh_clone = Arc::clone(&webhook_mgr);
+                                let br_clone = Arc::clone(&branch_mgr);
                                 tokio::spawn(async move {
-                                    let _ = handle_http_connection(socket, db_clone, func_clone, rt_clone, wh_clone).await;
+                                    let _ = handle_http_connection(
+                                        socket, db_clone, func_clone, rt_clone, wh_clone, br_clone,
+                                    )
+                                    .await;
                                 });
                             }
                             Err(_) => break,
@@ -101,6 +108,7 @@ async fn handle_http_connection(
     functions_reg: Arc<FunctionRegistry>,
     realtime_mgr: Arc<RealtimeChannelManager>,
     webhook_mgr: Arc<crate::webhooks::WebhookManager>,
+    branch_mgr: Arc<crate::branching::BranchManager>,
 ) -> std::io::Result<()> {
     let mut header_buf = Vec::new();
     let mut temp_chunk = [0u8; 1024];
@@ -478,6 +486,17 @@ async fn handle_http_connection(
         .await
     } else if path.starts_with("/v1/webhooks") || path.starts_with("/admin/webhooks") {
         handle_webhooks_request(&webhook_mgr, &method, path, query_string, &body, &exec_ctx).await
+    } else if path.starts_with("/v1/branches") || path.starts_with("/admin/branches") {
+        handle_branches_request(
+            &branch_mgr,
+            &db,
+            &method,
+            path,
+            query_string,
+            &body,
+            &exec_ctx,
+        )
+        .await
     } else if let Some(func_name) = path.strip_prefix("/v1/rpc/") {
         handle_rpc(&db, func_name, &body, &exec_ctx).await
     } else if let Some(table_name) = path.strip_prefix("/v1/rest/") {
@@ -586,6 +605,102 @@ async fn handle_webhooks_request(
                 404,
                 "Not Found",
                 serde_json::json!({ "error": "webhook not found" }),
+            )
+        }
+    } else {
+        (
+            405,
+            "Method Not Allowed",
+            serde_json::json!({ "error": format!("method '{method}' not allowed") }),
+        )
+    }
+}
+
+async fn handle_branches_request(
+    branch_mgr: &crate::branching::BranchManager,
+    source_db: &SharedDatabase,
+    method: &str,
+    path: &str,
+    query_string: &str,
+    body: &str,
+    exec_ctx: &crate::auth::ExecutionContext,
+) -> (u16, &'static str, serde_json::Value) {
+    if !exec_ctx.is_authenticated() {
+        return (
+            401,
+            "Unauthorized",
+            serde_json::json!({ "error": "authentication required" }),
+        );
+    }
+
+    if method == "GET" {
+        let list = branch_mgr.list_branches().await;
+        (200, "OK", serde_json::json!({ "branches": list }))
+    } else if method == "POST" {
+        let payload: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": "invalid JSON body" }),
+                )
+            }
+        };
+        let branch_name = match payload.get("name").and_then(|n| n.as_str()) {
+            Some(n) => n,
+            None => {
+                return (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": "missing branch name" }),
+                )
+            }
+        };
+
+        match branch_mgr.create_branch(branch_name, source_db).await {
+            Ok(meta) => (
+                201,
+                "Created",
+                serde_json::json!({ "status": "created", "branch": meta }),
+            ),
+            Err(e) => (
+                400,
+                "Bad Request",
+                serde_json::json!({ "error": e.to_string() }),
+            ),
+        }
+    } else if method == "DELETE" {
+        let name = if let Some(sub) = path.strip_prefix("/v1/branches/") {
+            sub
+        } else if let Some(sub) = path.strip_prefix("/admin/branches/") {
+            sub
+        } else if !query_string.is_empty() {
+            query_string.strip_prefix("name=").unwrap_or(query_string)
+        } else {
+            ""
+        };
+
+        if name.is_empty() {
+            return (
+                400,
+                "Bad Request",
+                serde_json::json!({ "error": "missing branch name" }),
+            );
+        }
+
+        let deleted = branch_mgr.delete_branch(name).await;
+        if deleted {
+            (
+                200,
+                "OK",
+                serde_json::json!({ "status": "deleted", "branch": name }),
+            )
+        } else {
+            (
+                404,
+                "Not Found",
+                serde_json::json!({ "error": "branch not found" }),
             )
         }
     } else {
