@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod backup;
+pub mod branching;
 pub mod btree;
 pub mod catalog;
 pub mod engine;
@@ -18,6 +19,7 @@ pub mod webhooks;
 
 pub use auth::{ExecutionContext, SessionClaims};
 pub use backup::{dump_database, restore_database};
+pub use branching::{BranchManager, BranchMetadata};
 pub use engine::{Database, ExecResult, SharedDatabase};
 pub use error::{DbError, Result};
 pub use functions::{FunctionMetadata, FunctionRegistry};
