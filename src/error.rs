@@ -18,6 +18,8 @@ pub enum StorageError {
     BufferPoolFull,
     #[error("database is locked by another active process ({0})")]
     DatabaseLocked(String),
+    #[error("lock acquisition timed out / deadlock avoided")]
+    LockTimeout,
 }
 
 #[derive(Debug, Error)]
