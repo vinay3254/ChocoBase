@@ -193,6 +193,10 @@ pub enum Expr {
         expr: Box<Expr>,
         query: String,
     },
+    FtsSnippet {
+        expr: Box<Expr>,
+        query: String,
+    },
     AuthUid,
 }
 
