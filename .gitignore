@@ -6,3 +6,5 @@
 *.lock
 /storage/
 *.sql
+repl
+frontend/node_modules/
