@@ -362,6 +362,7 @@ fn keyword_or_identifier(text: &str) -> Token {
         "INNER_PRODUCT" => Token::InnerProduct,
         "FTS_MATCH" | "MATCHES" => Token::FtsMatch,
         "FTS_RANK" => Token::FtsRank,
+        "FTS_SNIPPET" | "TS_HEADLINE" => Token::FtsSnippet,
         "TEXT" => Token::KwText,
         "BOOLEAN" => Token::KwBoolean,
         "JSON" => Token::KwJson,
