@@ -385,6 +385,8 @@ async fn handle_http_connection(
             && !path.starts_with("/storage/")
             && !path.starts_with("/assets/")
             && path != "/health"
+            && path != "/healthz"
+            && path != "/readyz"
             && path != "/metrics"
             && path != "/.well-known/jwks.json"
         {
@@ -1001,12 +1003,13 @@ async fn handle_http_connection(
             "OK",
             serde_json::to_value(&gql_resp).unwrap_or_else(|_| serde_json::json!({})),
         )
-    } else if method == "GET" && path == "/health" {
+    } else if method == "GET" && (path == "/health" || path == "/healthz" || path == "/readyz") {
         (
             200,
             "OK",
             serde_json::json!({
                 "status": "healthy",
+                "ready": true,
                 "version": "0.1.0",
                 "engine": "ChocoBase"
             }),
