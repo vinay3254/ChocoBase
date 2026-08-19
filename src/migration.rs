@@ -59,6 +59,37 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     stmts
 }
 
+pub fn load_from_dir(dir: impl AsRef<std::path::Path>) -> Result<Vec<Migration>> {
+    let mut migrations = Vec::new();
+    let p = dir.as_ref();
+    if !p.exists() {
+        return Ok(migrations);
+    }
+    if let Ok(entries) = std::fs::read_dir(p) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("sql") {
+                let file_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                let (version, name) = match file_name.split_once('_') {
+                    Some((ver_str, name_str)) => {
+                        let v = ver_str.parse::<i64>().unwrap_or(1);
+                        (v, name_str.to_string())
+                    }
+                    None => {
+                        let v = file_name.parse::<i64>().unwrap_or(1);
+                        (v, file_name.to_string())
+                    }
+                };
+                if let Ok(sql) = std::fs::read_to_string(&path) {
+                    migrations.push(Migration { version, name, sql });
+                }
+            }
+        }
+    }
+    migrations.sort_by_key(|m| m.version);
+    Ok(migrations)
+}
+
 impl<'a> MigrationRunner<'a> {
     pub fn new(db: &'a mut Database) -> Self {
         Self { db }
