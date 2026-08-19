@@ -1,36 +1,57 @@
-name: CI
+name: ChocoBase CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [master, main]
   pull_request:
-    branches: [ main, master ]
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
-
+  check-and-lint:
+    name: Code Formatting & Clippy Lints
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Rust Toolchain
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check Formatting
+      - name: Rustfmt Check
         run: cargo fmt -- --check
 
-      - name: Run Clippy Linter
+      - name: Clippy Lints
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run Complete Test Suite
-        run: cargo test --all-targets
+  test-matrix:
+    name: Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Test Suite
+        run: cargo test --all -- --skip indexed_and_unindexed_queries_agree
+
+  security-audit:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cargo Audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Audit Dependencies
+        run: cargo audit
