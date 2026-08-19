@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::auth::ExecutionContext;
@@ -90,11 +90,12 @@ pub async fn handle_storage_request(
     query_str: &str,
     body: &str,
     ctx: &ExecutionContext,
+    range_header: Option<&str>,
 ) -> (
     u16,
     &'static str,
     serde_json::Value,
-    Option<(Vec<u8>, String)>,
+    Option<(Vec<u8>, String, Option<String>, String)>,
 ) {
     ensure_storage_tables(db);
     let subpath = path.strip_prefix("/v1/storage/v1").unwrap_or(path);
@@ -437,11 +438,44 @@ pub async fn handle_storage_request(
                             } else {
                                 "application/octet-stream"
                             };
+
+                            let mut hasher = Sha256::new();
+                            hasher.update(&bytes);
+                            let etag = format!("\"{:x}\"", hasher.finalize());
+
+                            let (status_code, status_text, final_bytes, cr_opt) =
+                                if let Some(range_str) = range_header {
+                                    if let Some(range_val) = range_str.strip_prefix("bytes=") {
+                                        let total_len = bytes.len();
+                                        let parts: Vec<&str> = range_val.split('-').collect();
+                                        let start = parts[0].parse::<usize>().unwrap_or(0);
+                                        let end = if parts.len() > 1 && !parts[1].is_empty() {
+                                            parts[1]
+                                                .parse::<usize>()
+                                                .unwrap_or(total_len.saturating_sub(1))
+                                                .min(total_len.saturating_sub(1))
+                                        } else {
+                                            total_len.saturating_sub(1)
+                                        };
+                                        if start < total_len && start <= end {
+                                            let slice = bytes[start..=end].to_vec();
+                                            let cr = format!("bytes {start}-{end}/{total_len}");
+                                            (206, "Partial Content", slice, Some(cr))
+                                        } else {
+                                            (200, "OK", bytes, None)
+                                        }
+                                    } else {
+                                        (200, "OK", bytes, None)
+                                    }
+                                } else {
+                                    (200, "OK", bytes, None)
+                                };
+
                             return (
-                                200,
-                                "OK",
+                                status_code,
+                                status_text,
                                 serde_json::Value::Null,
-                                Some((bytes, content_type.to_string())),
+                                Some((final_bytes, content_type.to_string(), cr_opt, etag)),
                             );
                         }
                     }
@@ -502,6 +536,10 @@ pub async fn handle_storage_request(
                     }
 
                     let size_bytes = bytes.len() as i64;
+                    let mut hasher = Sha256::new();
+                    hasher.update(bytes);
+                    let etag_hex = format!("{:x}", hasher.finalize());
+
                     let owner_id = ctx
                         .user_id
                         .map(|id| id.to_string())
@@ -525,7 +563,9 @@ pub async fn handle_storage_request(
                         serde_json::json!({
                             "Key": format!("{bucket_id}/{object_key}"),
                             "Id": obj_id,
-                            "size": size_bytes
+                            "size": size_bytes,
+                            "etag": etag_hex,
+                            "checksum_sha256": etag_hex
                         }),
                         None,
                     )
