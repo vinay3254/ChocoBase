@@ -499,6 +499,41 @@ async fn handle_http_connection(
                 ),
             }
         }
+    } else if method == "GET" && path == "/v1/admin/audit-logs" {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else {
+            let action_filter = query_string.split('&').find_map(|p| {
+                p.split_once('=')
+                    .and_then(|(k, v)| if k == "action" { Some(v) } else { None })
+            });
+            let user_id_filter = query_string.split('&').find_map(|p| {
+                p.split_once('=').and_then(|(k, v)| {
+                    if k == "user_id" {
+                        v.parse::<i64>().ok()
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            match crate::audit::query_audit_logs(&db, action_filter, user_id_filter, 100) {
+                Ok(entries) => (
+                    200,
+                    "OK",
+                    serde_json::to_value(&entries).unwrap_or_default(),
+                ),
+                Err(e) => (
+                    500,
+                    "Internal Server Error",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        }
     } else if method == "POST" && path == "/v1/sql" {
         let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&body) {
             parsed_json
