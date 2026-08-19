@@ -51,6 +51,7 @@ impl HttpServer {
             std::env::temp_dir().join("chocobase_replicas"),
             (*db).clone(),
         ));
+        let fdw_mgr = Arc::new(crate::fdw::FdwManager::new());
 
         tokio::spawn(async move {
             loop {
@@ -65,9 +66,10 @@ impl HttpServer {
                                 let wh_clone = Arc::clone(&webhook_mgr);
                                 let br_clone = Arc::clone(&branch_mgr);
                                 let rep_clone = Arc::clone(&replica_mgr);
+                                let fdw_clone = Arc::clone(&fdw_mgr);
                                 tokio::spawn(async move {
                                     let _ = handle_http_connection(
-                                        socket, db_clone, func_clone, rt_clone, rl_clone, wh_clone, br_clone, rep_clone,
+                                        socket, db_clone, func_clone, rt_clone, rl_clone, wh_clone, br_clone, rep_clone, fdw_clone,
                                     )
                                     .await;
                                 });
@@ -125,6 +127,7 @@ async fn handle_http_connection(
     webhook_mgr: Arc<crate::webhooks::WebhookManager>,
     branch_mgr: Arc<crate::branching::BranchManager>,
     replica_mgr: Arc<crate::replica::ReplicaManager>,
+    fdw_mgr: Arc<crate::fdw::FdwManager>,
 ) -> std::io::Result<()> {
     let mut header_buf = Vec::new();
     let mut temp_chunk = [0u8; 1024];
@@ -766,6 +769,147 @@ async fn handle_http_connection(
                     "Not Found",
                     serde_json::json!({ "error": "replica not found" }),
                 )
+            }
+        } else {
+            (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+            )
+        }
+    } else if path == "/v1/admin/fdw/servers" || path == "/admin/fdw/servers" {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else if method == "GET" {
+            let servers = fdw_mgr.list_servers().await;
+            (200, "OK", serde_json::json!({ "servers": servers }))
+        } else if method == "POST" {
+            match serde_json::from_str::<crate::fdw::ForeignServer>(&body) {
+                Ok(server) => match fdw_mgr.register_server(server.clone()).await {
+                    Ok(_) => (
+                        201,
+                        "Created",
+                        serde_json::json!({ "status": "created", "server": server }),
+                    ),
+                    Err(e) => (
+                        400,
+                        "Bad Request",
+                        serde_json::json!({ "error": e.to_string() }),
+                    ),
+                },
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": format!("invalid server json: {e}") }),
+                ),
+            }
+        } else {
+            (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+            )
+        }
+    } else if path == "/v1/admin/fdw/tables" || path == "/admin/fdw/tables" {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else if method == "GET" {
+            let tables = fdw_mgr.list_foreign_tables().await;
+            (200, "OK", serde_json::json!({ "tables": tables }))
+        } else if method == "POST" {
+            match serde_json::from_str::<crate::fdw::ForeignTable>(&body) {
+                Ok(table) => match fdw_mgr.create_foreign_table(table.clone()).await {
+                    Ok(_) => (
+                        201,
+                        "Created",
+                        serde_json::json!({ "status": "created", "table": table }),
+                    ),
+                    Err(e) => (
+                        400,
+                        "Bad Request",
+                        serde_json::json!({ "error": e.to_string() }),
+                    ),
+                },
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": format!("invalid table json: {e}") }),
+                ),
+            }
+        } else {
+            (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+            )
+        }
+    } else if let Some(table_name) = path
+        .strip_prefix("/v1/admin/fdw/tables/")
+        .or_else(|| path.strip_prefix("/admin/fdw/tables/"))
+    {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else if method == "DELETE" {
+            let dropped = fdw_mgr.drop_foreign_table(table_name).await;
+            if dropped {
+                (
+                    200,
+                    "OK",
+                    serde_json::json!({ "status": "deleted", "table": table_name }),
+                )
+            } else {
+                (
+                    404,
+                    "Not Found",
+                    serde_json::json!({ "error": "foreign table not found" }),
+                )
+            }
+        } else if method == "GET" {
+            match fdw_mgr.scan_table(table_name).await {
+                Ok(rows) => (200, "OK", serde_json::json!({ "rows": rows })),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        } else {
+            (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+            )
+        }
+    } else if let Some(table_name) = path
+        .strip_prefix("/v1/fdw/")
+        .or_else(|| path.strip_prefix("/fdw/"))
+    {
+        if !exec_ctx.is_authenticated() && !exec_ctx.is_admin {
+            (
+                401,
+                "Unauthorized",
+                serde_json::json!({ "error": "authentication required to query foreign tables" }),
+            )
+        } else if method == "GET" {
+            match fdw_mgr.scan_table(table_name).await {
+                Ok(rows) => (200, "OK", serde_json::json!({ "rows": rows })),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
             }
         } else {
             (
