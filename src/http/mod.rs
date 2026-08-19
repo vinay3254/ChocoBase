@@ -18,6 +18,7 @@ pub mod dashboard;
 pub mod functions;
 pub mod realtime_channels;
 pub mod storage;
+pub mod websocket;
 
 use crate::functions::FunctionRegistry;
 use realtime_channels::RealtimeChannelManager;
@@ -150,6 +151,8 @@ async fn handle_http_connection(
     let mut auth_token = None;
     let mut origin_header = None;
     let mut range_header = None;
+    let mut ws_upgrade = false;
+    let mut ws_key = None;
     let mut content_length = 0usize;
 
     for line in lines {
@@ -164,6 +167,12 @@ async fn handle_http_connection(
                 origin_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("range") {
                 range_header = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("upgrade")
+                && v_trim.eq_ignore_ascii_case("websocket")
+            {
+                ws_upgrade = true;
+            } else if k_trim.eq_ignore_ascii_case("sec-websocket-key") {
+                ws_key = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("content-length") {
                 content_length = v_trim.parse().unwrap_or(0);
             }
@@ -236,6 +245,16 @@ async fn handle_http_connection(
         Some((p, q)) => (p, q),
         None => (full_path.as_str(), ""),
     };
+
+    if ws_upgrade
+        && (path.starts_with("/v1/realtime/v1/websocket")
+            || path.starts_with("/realtime/v1/websocket"))
+    {
+        if let Some(key) = ws_key {
+            return websocket::handle_websocket_session(socket, &key, realtime_mgr, db, exec_ctx)
+                .await;
+        }
+    }
 
     if method == "GET" && (path == "/" || path == "/dashboard") {
         let header = format!(
