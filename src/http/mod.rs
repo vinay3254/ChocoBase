@@ -534,6 +534,50 @@ async fn handle_http_connection(
                 ),
             }
         }
+    } else if method == "POST" && path == "/v1/admin/migrations/rollback" {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else {
+            let parsed_json: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            let down_sql = parsed_json
+                .get("down_sql")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+
+            let res = db.with_db(|d| {
+                let mut runner = crate::migration::MigrationRunner::new(d);
+                runner.rollback_last(down_sql)
+            });
+
+            match res {
+                Ok(Some(rolled_back)) => (
+                    200,
+                    "OK",
+                    serde_json::json!({
+                        "status": "rolled_back",
+                        "migration": {
+                            "version": rolled_back.version,
+                            "name": rolled_back.name,
+                        }
+                    }),
+                ),
+                Ok(None) => (
+                    200,
+                    "OK",
+                    serde_json::json!({ "status": "no_migrations_to_rollback" }),
+                ),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        }
     } else if method == "POST" && path == "/v1/sql" {
         let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&body) {
             parsed_json
