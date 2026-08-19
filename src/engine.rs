@@ -171,6 +171,17 @@ impl SharedDatabase {
         let mut db = self.db.lock().unwrap();
         crate::backup::restore_database(&mut db, sql)
     }
+
+    pub fn restore_to_point_in_time(
+        &self,
+        base_dump_sql: &str,
+        target_timestamp_ms: u64,
+    ) -> Result<usize> {
+        let token = self.locks.begin();
+        token.exclusive("database");
+        let mut db = self.db.lock().unwrap();
+        crate::backup::restore_to_point_in_time(&mut db, base_dump_sql, target_timestamp_ms)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
