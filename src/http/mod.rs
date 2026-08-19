@@ -47,6 +47,10 @@ impl HttpServer {
         let branch_mgr = Arc::new(crate::branching::BranchManager::new(
             std::env::temp_dir().join("chocobase_branches"),
         ));
+        let replica_mgr = Arc::new(crate::replica::ReplicaManager::new(
+            std::env::temp_dir().join("chocobase_replicas"),
+            (*db).clone(),
+        ));
 
         tokio::spawn(async move {
             loop {
@@ -60,9 +64,10 @@ impl HttpServer {
                                 let rl_clone = Arc::clone(&rate_limiter);
                                 let wh_clone = Arc::clone(&webhook_mgr);
                                 let br_clone = Arc::clone(&branch_mgr);
+                                let rep_clone = Arc::clone(&replica_mgr);
                                 tokio::spawn(async move {
                                     let _ = handle_http_connection(
-                                        socket, db_clone, func_clone, rt_clone, rl_clone, wh_clone, br_clone,
+                                        socket, db_clone, func_clone, rt_clone, rl_clone, wh_clone, br_clone, rep_clone,
                                     )
                                     .await;
                                 });
@@ -89,11 +94,14 @@ fn get_cors_header(origin_opt: Option<&str>) -> (String, bool) {
     let origins_env = std::env::var("CHOCOBASE_CORS_ORIGINS").unwrap_or_else(|_| "*".into());
     let origin = match origin_opt {
         Some(o) => o,
-        None => return ("Access-Control-Allow-Origin: *\r\n".to_string(), true),
+        None => return (String::new(), false),
     };
 
     if origins_env == "*" {
-        ("Access-Control-Allow-Origin: *\r\n".to_string(), true)
+        (
+            format!("Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\n"),
+            true,
+        )
     } else {
         let allowed_list: Vec<&str> = origins_env.split(',').map(|s| s.trim()).collect();
         if allowed_list.contains(&origin) {
@@ -107,6 +115,7 @@ fn get_cors_header(origin_opt: Option<&str>) -> (String, bool) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_http_connection(
     mut socket: TcpStream,
     db: Arc<SharedDatabase>,
@@ -115,6 +124,7 @@ async fn handle_http_connection(
     rate_limiter: Arc<RateLimiter>,
     webhook_mgr: Arc<crate::webhooks::WebhookManager>,
     branch_mgr: Arc<crate::branching::BranchManager>,
+    replica_mgr: Arc<crate::replica::ReplicaManager>,
 ) -> std::io::Result<()> {
     let mut header_buf = Vec::new();
     let mut temp_chunk = [0u8; 1024];
@@ -649,7 +659,77 @@ async fn handle_http_connection(
                 ),
             }
         }
-    } else if method == "POST" && path == "/v1/sql" {
+    } else if path == "/v1/admin/replicas" || path == "/admin/replicas" {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else if method == "GET" {
+            let list = replica_mgr.list_replicas().await;
+            (200, "OK", serde_json::json!({ "replicas": list }))
+        } else if method == "POST" {
+            let payload: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            let replica_id = payload
+                .get("id")
+                .or_else(|| payload.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("replica_1");
+
+            match replica_mgr.create_replica(replica_id).await {
+                Ok(meta) => (
+                    201,
+                    "Created",
+                    serde_json::json!({ "status": "created", "replica": meta }),
+                ),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        } else {
+            (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+            )
+        }
+    } else if let Some(replica_id) = path
+        .strip_prefix("/v1/admin/replicas/")
+        .or_else(|| path.strip_prefix("/admin/replicas/"))
+    {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else if method == "DELETE" {
+            let deleted = replica_mgr.delete_replica(replica_id).await;
+            if deleted {
+                (
+                    200,
+                    "OK",
+                    serde_json::json!({ "status": "deleted", "replica_id": replica_id }),
+                )
+            } else {
+                (
+                    404,
+                    "Not Found",
+                    serde_json::json!({ "error": "replica not found" }),
+                )
+            }
+        } else {
+            (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+            )
+        }
+    } else if method == "POST" && (path == "/v1/sql" || path == "/sql") {
         let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&body) {
             parsed_json
                 .get("sql")
@@ -667,11 +747,11 @@ async fn handle_http_connection(
                 serde_json::json!({ "error": "missing sql query in request body" }),
             )
         } else {
-            match db.execute_with_context(&sql, &exec_ctx) {
-                Ok(result) => (
+            match replica_mgr.execute_routed(&sql, &exec_ctx).await {
+                Ok((result, route)) => (
                     200,
                     "OK",
-                    serde_json::json!({ "status": "ok", "result": result }),
+                    serde_json::json!({ "status": "ok", "result": result, "route": route }),
                 ),
                 Err(err) => (
                     400,
