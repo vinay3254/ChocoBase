@@ -857,41 +857,117 @@ async fn handle_branches_request(
     }
 
     if method == "GET" {
-        let list = branch_mgr.list_branches().await;
-        (200, "OK", serde_json::json!({ "branches": list }))
-    } else if method == "POST" {
-        let payload: serde_json::Value = match serde_json::from_str(body) {
-            Ok(v) => v,
-            Err(_) => {
-                return (
-                    400,
-                    "Bad Request",
-                    serde_json::json!({ "error": "invalid JSON body" }),
-                )
-            }
-        };
-        let branch_name = match payload.get("name").and_then(|n| n.as_str()) {
-            Some(n) => n,
-            None => {
-                return (
-                    400,
-                    "Bad Request",
-                    serde_json::json!({ "error": "missing branch name" }),
-                )
-            }
+        let diff_branch_name = if let Some(sub) = path.strip_prefix("/v1/branches/") {
+            sub.strip_suffix("/diff")
+        } else if let Some(sub) = path.strip_prefix("/admin/branches/") {
+            sub.strip_suffix("/diff")
+        } else {
+            None
         };
 
-        match branch_mgr.create_branch(branch_name, source_db).await {
-            Ok(meta) => (
-                201,
-                "Created",
-                serde_json::json!({ "status": "created", "branch": meta }),
-            ),
-            Err(e) => (
-                400,
-                "Bad Request",
-                serde_json::json!({ "error": e.to_string() }),
-            ),
+        if let Some(bname) = diff_branch_name {
+            match branch_mgr.diff_branch(bname, source_db).await {
+                Ok(diff) => (200, "OK", serde_json::to_value(&diff).unwrap_or_default()),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        } else {
+            let list = branch_mgr.list_branches().await;
+            (200, "OK", serde_json::json!({ "branches": list }))
+        }
+    } else if method == "POST" {
+        let merge_branch_name = if let Some(sub) = path.strip_prefix("/v1/branches/") {
+            sub.strip_suffix("/merge")
+        } else if let Some(sub) = path.strip_prefix("/admin/branches/") {
+            sub.strip_suffix("/merge")
+        } else {
+            None
+        };
+
+        let sql_branch_name = if let Some(sub) = path.strip_prefix("/v1/branches/") {
+            sub.strip_suffix("/sql")
+        } else if let Some(sub) = path.strip_prefix("/admin/branches/") {
+            sub.strip_suffix("/sql")
+        } else {
+            None
+        };
+
+        if let Some(bname) = sql_branch_name {
+            let branch_db = match branch_mgr.get_branch_db(bname).await {
+                Some(db) => db,
+                None => {
+                    return (
+                        404,
+                        "Not Found",
+                        serde_json::json!({ "error": format!("branch '{bname}' not found") }),
+                    )
+                }
+            };
+            let parsed_json: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            let sql = parsed_json
+                .get("sql")
+                .and_then(|s| s.as_str())
+                .unwrap_or_else(|| body.trim());
+
+            match branch_db.execute_with_context(sql, exec_ctx) {
+                Ok(result) => (
+                    200,
+                    "OK",
+                    serde_json::json!({ "status": "ok", "result": result }),
+                ),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        } else if let Some(bname) = merge_branch_name {
+            match branch_mgr.merge_branch(bname, source_db).await {
+                Ok(res) => (200, "OK", serde_json::to_value(&res).unwrap_or_default()),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        } else {
+            let payload: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    return (
+                        400,
+                        "Bad Request",
+                        serde_json::json!({ "error": "invalid JSON body" }),
+                    )
+                }
+            };
+            let branch_name = match payload.get("name").and_then(|n| n.as_str()) {
+                Some(n) => n,
+                None => {
+                    return (
+                        400,
+                        "Bad Request",
+                        serde_json::json!({ "error": "missing branch name" }),
+                    )
+                }
+            };
+
+            match branch_mgr.create_branch(branch_name, source_db).await {
+                Ok(meta) => (
+                    201,
+                    "Created",
+                    serde_json::json!({ "status": "created", "branch": meta }),
+                ),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
         }
     } else if method == "DELETE" {
         let name = if let Some(sub) = path.strip_prefix("/v1/branches/") {
