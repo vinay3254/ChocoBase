@@ -20,10 +20,12 @@ pub fn ensure_storage_tables(db: &SharedDatabase) {
     let buckets_sql = "CREATE TABLE _storage_buckets (id TEXT PRIMARY KEY, name TEXT NOT NULL, public BOOLEAN NOT NULL, created_at INTEGER NOT NULL)";
     let objects_sql = "CREATE TABLE _storage_objects (id TEXT PRIMARY KEY, bucket_id TEXT NOT NULL, name TEXT NOT NULL, owner_id INTEGER, content_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, metadata JSON, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)";
     let lifecycle_sql = "CREATE TABLE _storage_lifecycle_rules (id TEXT PRIMARY KEY, bucket_id TEXT NOT NULL, prefix TEXT NOT NULL, expiry_days INTEGER NOT NULL, created_at INTEGER NOT NULL)";
+    let resumable_sql = "CREATE TABLE _storage_resumable_sessions (id TEXT PRIMARY KEY, bucket_id TEXT NOT NULL, name TEXT NOT NULL, owner_id INTEGER, content_type TEXT NOT NULL, total_size INTEGER NOT NULL, uploaded_offset INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)";
 
     let _ = db.execute_with_context(buckets_sql, &ExecutionContext::admin());
     let _ = db.execute_with_context(objects_sql, &ExecutionContext::admin());
     let _ = db.execute_with_context(lifecycle_sql, &ExecutionContext::admin());
+    let _ = db.execute_with_context(resumable_sql, &ExecutionContext::admin());
 }
 
 pub fn get_storage_root() -> PathBuf {
@@ -248,6 +250,223 @@ pub async fn handle_storage_request(
     }
 
     let subpath = path.strip_prefix("/v1/storage/v1").unwrap_or(path);
+
+    if let Some(resumable_sub) = subpath.strip_prefix("/upload/resumable") {
+        let session_id = resumable_sub.trim_start_matches('/').trim();
+        if method == "POST" && session_id.is_empty() {
+            let payload: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(_) => {
+                    return (
+                        400,
+                        "Bad Request",
+                        serde_json::json!({ "error": "invalid JSON body" }),
+                        None,
+                    )
+                }
+            };
+            let bucket_id = match payload.get("bucket_id").and_then(|v| v.as_str()) {
+                Some(b) => sanitize_object_path(b),
+                None => {
+                    return (
+                        400,
+                        "Bad Request",
+                        serde_json::json!({ "error": "missing bucket_id" }),
+                        None,
+                    )
+                }
+            };
+            let object_name = match payload
+                .get("object_name")
+                .or_else(|| payload.get("name"))
+                .and_then(|v| v.as_str())
+            {
+                Some(n) => sanitize_object_path(n),
+                None => {
+                    return (
+                        400,
+                        "Bad Request",
+                        serde_json::json!({ "error": "missing object_name" }),
+                        None,
+                    )
+                }
+            };
+            let content_type = payload
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("application/octet-stream");
+            let total_size = payload
+                .get("total_size")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let sess_id = format!("sess_{now}_{}", std::process::id());
+
+            let esc_sess = sess_id.replace('\'', "''");
+            let esc_bucket = bucket_id.replace('\'', "''");
+            let esc_name = object_name.replace('\'', "''");
+            let esc_ct = content_type.replace('\'', "''");
+            let owner_str = match ctx.user_id {
+                Some(uid) => uid.to_string(),
+                None => "NULL".to_string(),
+            };
+
+            let tmp_dir = get_storage_root().join("tmp_resumable");
+            let _ = fs::create_dir_all(&tmp_dir);
+            let staging_file = tmp_dir.join(&sess_id);
+            let _ = fs::write(&staging_file, []);
+
+            let insert_sql = format!("INSERT INTO _storage_resumable_sessions (id, bucket_id, name, owner_id, content_type, total_size, uploaded_offset, created_at, updated_at) VALUES ('{esc_sess}', '{esc_bucket}', '{esc_name}', {owner_str}, '{esc_ct}', {total_size}, 0, {now}, {now})");
+            let _ = db.execute_with_context(&insert_sql, &ExecutionContext::admin());
+
+            return (
+                201,
+                "Created",
+                serde_json::json!({
+                    "session_id": sess_id,
+                    "location": format!("/v1/storage/v1/upload/resumable/{sess_id}"),
+                    "status": "created"
+                }),
+                None,
+            );
+        } else if !session_id.is_empty() {
+            let esc_sess = session_id.replace('\'', "''");
+            let select_sql = format!("SELECT id, bucket_id, name, owner_id, content_type, total_size, uploaded_offset FROM _storage_resumable_sessions WHERE id = '{esc_sess}'");
+            let sess_row = match db.execute_with_context(&select_sql, &ExecutionContext::admin()) {
+                Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => rows[0].clone(),
+                _ => {
+                    return (
+                        404,
+                        "Not Found",
+                        serde_json::json!({ "error": "upload session not found" }),
+                        None,
+                    )
+                }
+            };
+
+            let bucket_id = match &sess_row[1] {
+                Value::Text(s) => s.clone(),
+                _ => String::new(),
+            };
+            let object_name = match &sess_row[2] {
+                Value::Text(s) => s.clone(),
+                _ => String::new(),
+            };
+            let content_type = match &sess_row[4] {
+                Value::Text(s) => s.clone(),
+                _ => "application/octet-stream".to_string(),
+            };
+            let total_size = match &sess_row[5] {
+                Value::Integer(i) => *i,
+                _ => 0,
+            };
+            let current_offset = match &sess_row[6] {
+                Value::Integer(i) => *i,
+                _ => 0,
+            };
+
+            if method == "PATCH" {
+                let chunk_bytes = body.as_bytes();
+                let tmp_file = get_storage_root().join("tmp_resumable").join(session_id);
+                let mut existing_bytes = fs::read(&tmp_file).unwrap_or_default();
+                existing_bytes.extend_from_slice(chunk_bytes);
+                let _ = fs::write(&tmp_file, &existing_bytes);
+
+                let new_offset = existing_bytes.len() as i64;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                if new_offset >= total_size {
+                    let final_path = get_storage_root().join(&bucket_id).join(&object_name);
+                    if let Some(parent) = final_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::write(&final_path, &existing_bytes);
+                    let _ = fs::remove_file(&tmp_file);
+
+                    let mut hasher = Sha256::new();
+                    hasher.update(&existing_bytes);
+                    let etag = format!("\"{:x}\"", hasher.finalize());
+
+                    let obj_id = format!("{bucket_id}/{object_name}");
+                    let esc_obj_id = obj_id.replace('\'', "''");
+                    let esc_bucket = bucket_id.replace('\'', "''");
+                    let esc_name = object_name.replace('\'', "''");
+                    let esc_ct = content_type.replace('\'', "''");
+                    let owner_str = match ctx.user_id {
+                        Some(uid) => uid.to_string(),
+                        None => "NULL".to_string(),
+                    };
+
+                    let delete_session_sql =
+                        format!("DELETE FROM _storage_resumable_sessions WHERE id = '{esc_sess}'");
+                    let _ =
+                        db.execute_with_context(&delete_session_sql, &ExecutionContext::admin());
+
+                    let insert_obj_sql = format!("INSERT INTO _storage_objects (id, bucket_id, name, owner_id, content_type, size_bytes, metadata, created_at, updated_at) VALUES ('{esc_obj_id}', '{esc_bucket}', '{esc_name}', {owner_str}, '{esc_ct}', {new_offset}, '{{}}', {now}, {now})");
+                    let _ = db.execute_with_context(&insert_obj_sql, &ExecutionContext::admin());
+
+                    return (
+                        200,
+                        "OK",
+                        serde_json::json!({
+                            "status": "completed",
+                            "etag": etag,
+                            "size_bytes": new_offset,
+                            "uploaded_offset": new_offset,
+                            "bucket_id": bucket_id,
+                            "name": object_name
+                        }),
+                        None,
+                    );
+                } else {
+                    let update_sql = format!("UPDATE _storage_resumable_sessions SET uploaded_offset = {new_offset}, updated_at = {now} WHERE id = '{esc_sess}'");
+                    let _ = db.execute_with_context(&update_sql, &ExecutionContext::admin());
+                    return (
+                        200,
+                        "OK",
+                        serde_json::json!({
+                            "status": "in_progress",
+                            "uploaded_offset": new_offset,
+                            "total_size": total_size
+                        }),
+                        None,
+                    );
+                }
+            } else if method == "GET" {
+                return (
+                    200,
+                    "OK",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "bucket_id": bucket_id,
+                        "name": object_name,
+                        "uploaded_offset": current_offset,
+                        "total_size": total_size
+                    }),
+                    None,
+                );
+            } else if method == "DELETE" {
+                let tmp_file = get_storage_root().join("tmp_resumable").join(session_id);
+                let _ = fs::remove_file(&tmp_file);
+                let delete_session_sql =
+                    format!("DELETE FROM _storage_resumable_sessions WHERE id = '{esc_sess}'");
+                let _ = db.execute_with_context(&delete_session_sql, &ExecutionContext::admin());
+                return (
+                    200,
+                    "OK",
+                    serde_json::json!({ "status": "canceled", "session_id": session_id }),
+                    None,
+                );
+            }
+        }
+    }
 
     if subpath.starts_with("/object/sign/") && method == "POST" {
         let sign_path = &subpath["/object/sign/".len()..];
