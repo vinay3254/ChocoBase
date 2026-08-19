@@ -463,6 +463,42 @@ async fn handle_http_connection(
                 ),
             }
         }
+    } else if method == "POST" && path == "/v1/admin/pitr/restore" {
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else {
+            let parsed_json: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            let base_dump = parsed_json
+                .get("base_dump")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let target_ts = parsed_json
+                .get("target_timestamp_ms")
+                .and_then(|s| s.as_u64())
+                .unwrap_or(0);
+
+            match db.restore_to_point_in_time(base_dump, target_ts) {
+                Ok(count) => (
+                    200,
+                    "OK",
+                    serde_json::json!({
+                        "status": "ok",
+                        "target_timestamp_ms": target_ts,
+                        "statements_replayed": count
+                    }),
+                ),
+                Err(e) => (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        }
     } else if method == "POST" && path == "/v1/sql" {
         let sql = if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&body) {
             parsed_json
