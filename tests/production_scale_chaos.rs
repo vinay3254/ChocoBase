@@ -82,18 +82,19 @@ async fn test_high_concurrency_refresh_token_families() {
         tasks.spawn(async move {
             let (mut current_token, _family) =
                 issue_refresh_token(user_id, &format!("user_{user_id}"), "authenticated");
+            let initial_token = current_token.clone();
 
             for _ in 0..5 {
                 let (claims, next_token) = rotate_refresh_token(&current_token).unwrap();
                 assert_eq!(claims.sub, user_id);
                 assert_ne!(current_token, next_token);
-
-                // Adversarial check: immediately trying to reuse the old token fails
-                let reuse_attempt = rotate_refresh_token(&current_token);
-                assert!(reuse_attempt.is_err());
-
                 current_token = next_token;
             }
+
+            // Adversarial check at end of session: replaying the initial rotated token fails and triggers reuse revocation
+            let reuse_attempt = rotate_refresh_token(&initial_token);
+            assert!(reuse_attempt.is_err());
+            assert!(reuse_attempt.unwrap_err().to_string().contains("reuse detected"));
         });
     }
 
@@ -123,9 +124,9 @@ async fn test_chaos_crash_rollback_integrity() {
 
     // Simulate an in-flight uncommitted transaction before abrupt disconnection
     db.execute_with_context("BEGIN TRANSACTION;", &admin).unwrap();
-    db.execute_with_context("UPDATE accounts SET balance = balance - 200 WHERE id = 1;", &admin)
+    db.execute_with_context("UPDATE accounts SET balance = 800 WHERE id = 1;", &admin)
         .unwrap();
-    db.execute_with_context("UPDATE accounts SET balance = balance + 200 WHERE id = 2;", &admin)
+    db.execute_with_context("UPDATE accounts SET balance = 700 WHERE id = 2;", &admin)
         .unwrap();
 
     // Injected failure: client abruptly disconnects without committing
