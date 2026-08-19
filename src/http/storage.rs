@@ -816,6 +816,102 @@ pub async fn handle_storage_request(
             }
             _ => (200, "OK", serde_json::json!([]), None),
         }
+    } else if let Some(render_subpath) = subpath.strip_prefix("/render/image/") {
+        let is_authenticated_path = render_subpath.starts_with("authenticated/");
+        let clean_render_path = render_subpath
+            .strip_prefix("public/")
+            .or_else(|| render_subpath.strip_prefix("authenticated/"))
+            .or_else(|| render_subpath.strip_prefix("sign/"))
+            .unwrap_or(render_subpath);
+
+        if let Some((bucket_id, object_key)) = clean_render_path.split_once('/') {
+            let bucket_id = sanitize_object_path(bucket_id);
+            let object_key = sanitize_object_path(object_key);
+
+            let mut format_choice = "origin".to_string();
+            for pair in query_str.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    if k == "format" {
+                        format_choice = v.to_lowercase();
+                    }
+                }
+            }
+
+            let bucket_sql =
+                format!("SELECT public FROM _storage_buckets WHERE id = '{bucket_id}'");
+            let is_public_bucket =
+                match db.execute_with_context(&bucket_sql, &ExecutionContext::admin()) {
+                    Ok(ExecResult::Rows { rows, .. }) if !rows.is_empty() => {
+                        matches!(&rows[0][0], Value::Boolean(true))
+                    }
+                    _ => false,
+                };
+
+            if is_authenticated_path && !ctx.is_authenticated() && !ctx.is_admin {
+                return (
+                    401,
+                    "Unauthorized",
+                    serde_json::json!({ "error": "access denied: authentication required" }),
+                    None,
+                );
+            }
+
+            if !is_public_bucket && !ctx.is_admin && !ctx.is_authenticated() {
+                return (
+                    401,
+                    "Unauthorized",
+                    serde_json::json!({ "error": "access denied to private bucket" }),
+                    None,
+                );
+            }
+
+            let file_path = get_storage_root().join(&bucket_id).join(&object_key);
+            if file_path.exists() {
+                if let Ok(bytes) = fs::read(&file_path) {
+                    let effective_format = if format_choice != "origin" {
+                        format_choice.as_str()
+                    } else if object_key.ends_with(".png") {
+                        "png"
+                    } else if object_key.ends_with(".webp") {
+                        "webp"
+                    } else {
+                        "jpeg"
+                    };
+
+                    let content_type = match effective_format {
+                        "webp" => "image/webp",
+                        "png" => "image/png",
+                        "avif" => "image/avif",
+                        _ => "image/jpeg",
+                    };
+
+                    let mut hasher = Sha256::new();
+                    hasher.update(&bytes);
+                    let etag = format!("\"{:x}\"", hasher.finalize());
+
+                    return (
+                        200,
+                        "OK",
+                        serde_json::Value::Null,
+                        Some((bytes, content_type.to_string(), None, etag)),
+                    );
+                }
+            }
+
+            (
+                404,
+                "Not Found",
+                serde_json::json!({ "error": "object not found" }),
+                None,
+            )
+        } else {
+            (
+                400,
+                "Bad Request",
+                serde_json::json!({ "error": "missing bucket and object key" }),
+                None,
+            )
+        }
     } else if let Some(obj_subpath) = subpath.strip_prefix("/object/") {
         let clean_subpath = obj_subpath.strip_prefix("public/").unwrap_or(obj_subpath);
 
