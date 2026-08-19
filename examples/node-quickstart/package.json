@@ -1,0 +1,13 @@
+{
+  "name": "chocobase-node-quickstart",
+  "version": "1.0.0",
+  "description": "Quickstart example using @chocobase/chocobase-js client SDK",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@chocobase/chocobase-js": "file:../../sdk/chocobase-js"
+  }
+}
