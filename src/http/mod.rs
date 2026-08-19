@@ -1472,7 +1472,7 @@ async fn handle_rest_table_crud(
                 ),
             }
         }
-        "POST" => {
+        "POST" | "PUT" => {
             let json_body: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1526,12 +1526,60 @@ async fn handle_rest_table_crud(
                 match db.execute_with_context(&sql, ctx) {
                     Ok(ExecResult::Modified(n)) => inserted_count += n,
                     Ok(_) => inserted_count += 1,
-                    Err(e) => {
+                    Err(insert_err) => {
+                        let pk_col_name = schema
+                            .columns
+                            .iter()
+                            .find(|c| c.is_primary_key)
+                            .map(|c| c.name.clone());
+                        let should_upsert = method == "PUT"
+                            || query_params.contains_key("on_conflict")
+                            || query_params.get("resolution").map(|s| s.as_str())
+                                == Some("merge-duplicates")
+                            || insert_err
+                                .to_string()
+                                .to_lowercase()
+                                .contains("primary key")
+                            || insert_err
+                                .to_string()
+                                .to_lowercase()
+                                .contains("already exists");
+
+                        if let (true, Some(pk_col)) = (should_upsert, pk_col_name) {
+                            if let Some(pk_val) = obj.get(&pk_col) {
+                                let mut set_clauses = Vec::new();
+                                for (k, v) in obj {
+                                    if k != &pk_col && schema.columns.iter().any(|c| &c.name == k) {
+                                        set_clauses
+                                            .push(format!("{k} = {}", json_to_sql_literal(v)));
+                                    }
+                                }
+                                if !set_clauses.is_empty() {
+                                    let update_sql = format!(
+                                        "UPDATE {table} SET {} WHERE {pk_col} = {}",
+                                        set_clauses.join(", "),
+                                        json_to_sql_literal(pk_val)
+                                    );
+                                    match db.execute_with_context(&update_sql, ctx) {
+                                        Ok(ExecResult::Modified(n)) => {
+                                            inserted_count += n;
+                                            continue;
+                                        }
+                                        Ok(_) => {
+                                            inserted_count += 1;
+                                            continue;
+                                        }
+                                        Err(_) => {}
+                                    }
+                                }
+                            }
+                        }
+
                         return (
                             400,
                             "Bad Request",
-                            serde_json::json!({ "error": e.to_string() }),
-                        )
+                            serde_json::json!({ "error": insert_err.to_string() }),
+                        );
                     }
                 }
             }
