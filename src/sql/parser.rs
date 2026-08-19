@@ -452,8 +452,8 @@ impl Parser {
                     right: Box::new(right),
                 }
             }
-            Token::FtsMatch | Token::FtsRank => {
-                let is_match = matches!(self.tokens[self.pos - 1].token, Token::FtsMatch);
+            Token::FtsMatch | Token::FtsRank | Token::FtsSnippet => {
+                let token_kind = self.tokens[self.pos - 1].token.clone();
                 self.expect(&Token::LParen)?;
                 let expr = self.parse_where_expr()?;
                 self.expect(&Token::Comma)?;
@@ -470,16 +470,19 @@ impl Parser {
                     }
                 };
                 self.expect(&Token::RParen)?;
-                if is_match {
-                    Expr::FtsMatch {
+                match token_kind {
+                    Token::FtsMatch => Expr::FtsMatch {
                         expr: Box::new(expr),
                         query,
-                    }
-                } else {
-                    Expr::FtsRank {
+                    },
+                    Token::FtsRank => Expr::FtsRank {
                         expr: Box::new(expr),
                         query,
-                    }
+                    },
+                    _ => Expr::FtsSnippet {
+                        expr: Box::new(expr),
+                        query,
+                    },
                 }
             }
             Token::Exists => {
