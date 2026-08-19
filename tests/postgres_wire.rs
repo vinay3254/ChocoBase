@@ -181,3 +181,149 @@ async fn read_query_response(stream: &mut TcpStream) -> (String, Vec<Vec<String>
 
     (command_tag, rows)
 }
+
+#[tokio::test]
+async fn test_postgres_wire_extended_query_protocol_parse_bind_execute() {
+    let file = NamedTempFile::new().unwrap();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = ServerConfig::new(addr, file.path());
+    let (_server, bound_addr) = Server::bind(config).await.unwrap();
+
+    let mut stream = TcpStream::connect(bound_addr).await.unwrap();
+
+    // 1. Startup & Auth Handshake
+    let mut startup_payload = Vec::new();
+    startup_payload.extend_from_slice(&(196608u32).to_be_bytes());
+    startup_payload.extend_from_slice(b"user\0postgres\0database\0test\0\0");
+    let startup_len = (startup_payload.len() + 4) as u32;
+
+    stream.write_all(&startup_len.to_be_bytes()).await.unwrap();
+    stream.write_all(&startup_payload).await.unwrap();
+    stream.flush().await.unwrap();
+
+    let mut auth_hdr = [0u8; 9];
+    stream.read_exact(&mut auth_hdr).await.unwrap();
+
+    let pass_payload = b"postgres\0";
+    let pass_len = (pass_payload.len() + 4) as u32;
+    stream.write_all(b"p").await.unwrap();
+    stream.write_all(&pass_len.to_be_bytes()).await.unwrap();
+    stream.write_all(pass_payload).await.unwrap();
+    stream.flush().await.unwrap();
+
+    loop {
+        let mut msg_type = [0u8; 1];
+        stream.read_exact(&mut msg_type).await.unwrap();
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.unwrap();
+        let msg_len = u32::from_be_bytes(len_buf) as usize;
+        let mut msg_body = vec![0u8; msg_len - 4];
+        stream.read_exact(&mut msg_body).await.unwrap();
+
+        if msg_type[0] == b'Z' {
+            break;
+        }
+    }
+
+    // 2. Create table using Simple Query
+    send_simple_query(
+        &mut stream,
+        "CREATE TABLE accounts (id INTEGER PRIMARY KEY, username TEXT)",
+    )
+    .await;
+    let _ = read_query_response(&mut stream).await;
+
+    // 3. Extended Query: Parse ('P')
+    let mut parse_payload = Vec::new();
+    parse_payload.extend_from_slice(b"stmt1\0");
+    parse_payload.extend_from_slice(b"INSERT INTO accounts (id, username) VALUES ($1, $2)\0");
+    parse_payload.extend_from_slice(&2u16.to_be_bytes()); // 2 parameters
+    parse_payload.extend_from_slice(&23u32.to_be_bytes()); // int4
+    parse_payload.extend_from_slice(&25u32.to_be_bytes()); // text
+    let parse_len = (parse_payload.len() + 4) as u32;
+
+    stream.write_all(b"P").await.unwrap();
+    stream.write_all(&parse_len.to_be_bytes()).await.unwrap();
+    stream.write_all(&parse_payload).await.unwrap();
+
+    // 4. Extended Query: Bind ('B')
+    let mut bind_payload = Vec::new();
+    bind_payload.extend_from_slice(b"portal1\0");
+    bind_payload.extend_from_slice(b"stmt1\0");
+    bind_payload.extend_from_slice(&0u16.to_be_bytes()); // 0 format codes
+    bind_payload.extend_from_slice(&2u16.to_be_bytes()); // 2 parameter values
+
+    // Param 1: "10"
+    let p1_val = b"10";
+    bind_payload.extend_from_slice(&(p1_val.len() as i32).to_be_bytes());
+    bind_payload.extend_from_slice(p1_val);
+
+    // Param 2: "prisma_user"
+    let p2_val = b"prisma_user";
+    bind_payload.extend_from_slice(&(p2_val.len() as i32).to_be_bytes());
+    bind_payload.extend_from_slice(p2_val);
+
+    bind_payload.extend_from_slice(&0u16.to_be_bytes()); // 0 result format codes
+    let bind_len = (bind_payload.len() + 4) as u32;
+
+    stream.write_all(b"B").await.unwrap();
+    stream.write_all(&bind_len.to_be_bytes()).await.unwrap();
+    stream.write_all(&bind_payload).await.unwrap();
+
+    // 5. Extended Query: Describe Portal ('D')
+    let mut desc_payload = Vec::new();
+    desc_payload.push(b'P');
+    desc_payload.extend_from_slice(b"portal1\0");
+    let desc_len = (desc_payload.len() + 4) as u32;
+
+    stream.write_all(b"D").await.unwrap();
+    stream.write_all(&desc_len.to_be_bytes()).await.unwrap();
+    stream.write_all(&desc_payload).await.unwrap();
+
+    // 6. Extended Query: Execute Portal ('E')
+    let mut exec_payload = Vec::new();
+    exec_payload.extend_from_slice(b"portal1\0");
+    exec_payload.extend_from_slice(&0u32.to_be_bytes()); // max_rows = 0 (unlimited)
+    let exec_len = (exec_payload.len() + 4) as u32;
+
+    stream.write_all(b"E").await.unwrap();
+    stream.write_all(&exec_len.to_be_bytes()).await.unwrap();
+    stream.write_all(&exec_payload).await.unwrap();
+
+    // 7. Extended Query: Sync ('S', len 4)
+    stream.write_all(b"S\x00\x00\x00\x04").await.unwrap();
+    stream.flush().await.unwrap();
+
+    // Read responses: ParseComplete ('1'), BindComplete ('2'), NoData ('n'), CommandComplete ('C'), ReadyForQuery ('Z')
+    let mut responses = Vec::new();
+    loop {
+        let mut msg_type = [0u8; 1];
+        stream.read_exact(&mut msg_type).await.unwrap();
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.unwrap();
+        let msg_len = u32::from_be_bytes(len_buf) as usize;
+        let mut msg_body = vec![0u8; msg_len - 4];
+        stream.read_exact(&mut msg_body).await.unwrap();
+
+        responses.push(msg_type[0]);
+        if msg_type[0] == b'Z' {
+            break;
+        }
+    }
+
+    assert!(responses.contains(&b'1')); // ParseComplete
+    assert!(responses.contains(&b'2')); // BindComplete
+    assert!(responses.contains(&b'n')); // NoData / RowDescription
+    assert!(responses.contains(&b'C')); // CommandComplete
+    assert!(responses.contains(&b'Z')); // ReadyForQuery
+
+    // Verify row was inserted
+    send_simple_query(
+        &mut stream,
+        "SELECT id, username FROM accounts WHERE id = 10",
+    )
+    .await;
+    let (tag, rows) = read_query_response(&mut stream).await;
+    assert_eq!(tag, "SELECT 1");
+    assert_eq!(rows, vec![vec!["10", "prisma_user"]]);
+}
