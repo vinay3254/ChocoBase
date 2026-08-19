@@ -164,4 +164,33 @@ impl<'a> MigrationRunner<'a> {
 
         Ok(newly_applied)
     }
+
+    pub fn rollback_last(&mut self, down_sql: &str) -> Result<Option<AppliedMigration>> {
+        self.ensure_migrations_table()?;
+        let applied = self.get_applied_migrations()?;
+        let last = match applied.last() {
+            Some(l) => l.clone(),
+            None => return Ok(None),
+        };
+
+        self.db.execute("BEGIN TRANSACTION")?;
+        for stmt in split_statements(down_sql) {
+            let s = stmt.trim();
+            if !s.is_empty() {
+                if let Err(e) = self.db.execute(s) {
+                    let _ = self.db.execute("ROLLBACK");
+                    return Err(e);
+                }
+            }
+        }
+
+        let del_sql = format!("DELETE FROM _migrations WHERE version = {}", last.version);
+        if let Err(e) = self.db.execute(&del_sql) {
+            let _ = self.db.execute("ROLLBACK");
+            return Err(e);
+        }
+
+        self.db.execute("COMMIT")?;
+        Ok(Some(last))
+    }
 }
