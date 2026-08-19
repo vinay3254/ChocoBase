@@ -98,6 +98,153 @@ pub async fn handle_storage_request(
     Option<(Vec<u8>, String, Option<String>, String)>,
 ) {
     ensure_storage_tables(db);
+
+    let s3_path = path
+        .strip_prefix("/v1/storage/s3/")
+        .or_else(|| path.strip_prefix("/s3/"));
+    if let Some(s3_subpath) = s3_path {
+        if let Some((bucket_id, object_key)) = s3_subpath.split_once('/') {
+            let bucket_id = sanitize_object_path(bucket_id);
+            let object_key = sanitize_object_path(object_key);
+            let obj_id = format!("{bucket_id}/{object_key}");
+
+            match method {
+                "PUT" => {
+                    let file_path = get_storage_root().join(&bucket_id).join(&object_key);
+                    if let Some(parent) = file_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let bytes = body.as_bytes();
+                    if fs::write(&file_path, bytes).is_err() {
+                        return (
+                            500,
+                            "Internal Server Error",
+                            serde_json::json!({ "error": "failed to write object" }),
+                            None,
+                        );
+                    }
+                    let mut hasher = Sha256::new();
+                    hasher.update(bytes);
+                    let etag = format!("\"{:x}\"", hasher.finalize());
+                    let size_bytes = bytes.len() as i64;
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let esc_obj_id = obj_id.replace('\'', "''");
+                    let esc_bucket_id = bucket_id.replace('\'', "''");
+                    let esc_obj_key = object_key.replace('\'', "''");
+                    let insert_sql = format!("INSERT INTO _storage_objects (id, bucket_id, name, owner_id, content_type, size_bytes, metadata, created_at, updated_at) VALUES ('{esc_obj_id}', '{esc_bucket_id}', '{esc_obj_key}', NULL, 'application/octet-stream', {size_bytes}, '{{}}', {now}, {now})");
+                    let _ = db.execute_with_context(&insert_sql, &ExecutionContext::admin());
+                    return (
+                        200,
+                        "OK",
+                        serde_json::json!({ "ETag": etag, "Key": object_key, "Bucket": bucket_id }),
+                        None,
+                    );
+                }
+                "GET" => {
+                    let file_path = get_storage_root().join(&bucket_id).join(&object_key);
+                    if file_path.exists() {
+                        if let Ok(bytes) = fs::read(&file_path) {
+                            let mut hasher = Sha256::new();
+                            hasher.update(&bytes);
+                            let etag = format!("\"{:x}\"", hasher.finalize());
+                            let (status_code, status_text, final_bytes, cr_opt) =
+                                if let Some(range_str) = range_header {
+                                    if let Some(range_val) = range_str.strip_prefix("bytes=") {
+                                        let total_len = bytes.len();
+                                        let parts: Vec<&str> = range_val.split('-').collect();
+                                        let start = parts[0].parse::<usize>().unwrap_or(0);
+                                        let end = if parts.len() > 1 && !parts[1].is_empty() {
+                                            parts[1]
+                                                .parse::<usize>()
+                                                .unwrap_or(total_len.saturating_sub(1))
+                                                .min(total_len.saturating_sub(1))
+                                        } else {
+                                            total_len.saturating_sub(1)
+                                        };
+                                        if start < total_len && start <= end {
+                                            let slice = bytes[start..=end].to_vec();
+                                            let cr = format!("bytes {start}-{end}/{total_len}");
+                                            (206, "Partial Content", slice, Some(cr))
+                                        } else {
+                                            (200, "OK", bytes, None)
+                                        }
+                                    } else {
+                                        (200, "OK", bytes, None)
+                                    }
+                                } else {
+                                    (200, "OK", bytes, None)
+                                };
+                            return (
+                                status_code,
+                                status_text,
+                                serde_json::Value::Null,
+                                Some((
+                                    final_bytes,
+                                    "application/octet-stream".to_string(),
+                                    cr_opt,
+                                    etag,
+                                )),
+                            );
+                        }
+                    }
+                    return (
+                        404,
+                        "Not Found",
+                        serde_json::json!({ "error": "NoSuchKey" }),
+                        None,
+                    );
+                }
+                "DELETE" => {
+                    let file_path = get_storage_root().join(&bucket_id).join(&object_key);
+                    let _ = fs::remove_file(file_path);
+                    let esc_obj_id = obj_id.replace('\'', "''");
+                    let sql = format!("DELETE FROM _storage_objects WHERE id = '{esc_obj_id}'");
+                    let _ = db.execute_with_context(&sql, &ExecutionContext::admin());
+                    return (204, "No Content", serde_json::Value::Null, None);
+                }
+                _ => {
+                    return (
+                        405,
+                        "Method Not Allowed",
+                        serde_json::json!({ "error": "MethodNotAllowed" }),
+                        None,
+                    )
+                }
+            }
+        } else {
+            let bucket_id = sanitize_object_path(s3_subpath);
+            if method == "GET" {
+                let sql = format!("SELECT name, size_bytes, created_at FROM _storage_objects WHERE bucket_id = '{bucket_id}'");
+                let contents = match db.execute_with_context(&sql, &ExecutionContext::admin()) {
+                    Ok(ExecResult::Rows { rows, .. }) => rows
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "Key": match &r[0] { Value::Text(s) => s, _ => "" },
+                                "Size": match &r[1] { Value::Integer(i) => *i, _ => 0 },
+                                "LastModified": match &r[2] { Value::Integer(i) => *i, _ => 0 }
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                    _ => vec![],
+                };
+                return (
+                    200,
+                    "OK",
+                    serde_json::json!({
+                        "Name": bucket_id,
+                        "KeyCount": contents.len(),
+                        "Contents": contents
+                    }),
+                    None,
+                );
+            }
+        }
+    }
+
     let subpath = path.strip_prefix("/v1/storage/v1").unwrap_or(path);
 
     if subpath.starts_with("/object/sign/") && method == "POST" {
