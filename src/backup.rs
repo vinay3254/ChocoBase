@@ -118,6 +118,16 @@ pub fn restore_database(db: &mut Database, sql: &str) -> Result<usize> {
             continue;
         }
 
+        if cleaned_stmt.to_uppercase().starts_with("CREATE TABLE ") {
+            let parts: Vec<&str> = cleaned_stmt.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let table_name = parts[2].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if db.table_schema(table_name).is_some() {
+                    let _ = db.execute(&format!("DROP TABLE {table_name}"));
+                }
+            }
+        }
+
         if let Err(e) = db.execute(&cleaned_stmt) {
             let _ = db.execute("ROLLBACK");
             return Err(e);
@@ -127,4 +137,62 @@ pub fn restore_database(db: &mut Database, sql: &str) -> Result<usize> {
 
     db.execute("COMMIT")?;
     Ok(count)
+}
+
+/// Ensures the PITR WAL logging table exists.
+pub fn ensure_pitr_tables(db: &mut Database) {
+    let sql = "CREATE TABLE _pitr_wal_log (id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL, sql TEXT NOT NULL)";
+    let _ = db.execute(sql);
+}
+
+/// Logs a mutation statement with timestamp for Point-In-Time Recovery.
+pub fn record_pitr_entry(db: &mut Database, timestamp_ms: u64, sql: &str) -> Result<()> {
+    ensure_pitr_tables(db);
+    let esc_sql = sql.replace('\'', "''");
+    let insert = format!(
+        "INSERT INTO _pitr_wal_log (id, timestamp_ms, sql) VALUES ({timestamp_ms}, {timestamp_ms}, '{esc_sql}')"
+    );
+    let _ = db.execute(&insert);
+    Ok(())
+}
+
+/// Restores a base SQL dump and deterministically replays WAL statements up to target_timestamp_ms.
+pub fn restore_to_point_in_time(
+    db: &mut Database,
+    base_dump_sql: &str,
+    target_timestamp_ms: u64,
+) -> Result<usize> {
+    ensure_pitr_tables(db);
+    let query = format!(
+        "SELECT sql FROM _pitr_wal_log WHERE timestamp_ms <= {target_timestamp_ms} ORDER BY id ASC"
+    );
+    let wal_statements = match db.execute(&query) {
+        Ok(ExecResult::Rows { rows, .. }) => rows
+            .into_iter()
+            .filter_map(|r| match r.into_iter().next() {
+                Some(Value::Text(s)) => Some(s),
+                _ => None,
+            })
+            .collect::<Vec<String>>(),
+        _ => vec![],
+    };
+
+    let mut total = 0;
+    if !base_dump_sql.is_empty() {
+        total += restore_database(db, base_dump_sql)?;
+    }
+
+    if !wal_statements.is_empty() {
+        db.execute("BEGIN TRANSACTION")?;
+        for stmt in &wal_statements {
+            if let Err(e) = db.execute(stmt) {
+                let _ = db.execute("ROLLBACK");
+                return Err(e);
+            }
+            total += 1;
+        }
+        db.execute("COMMIT")?;
+    }
+
+    Ok(total)
 }
