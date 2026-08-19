@@ -75,6 +75,14 @@ impl SharedDatabase {
         self.change_tx.subscribe()
     }
 
+    pub fn with_db<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut Database) -> Result<R>,
+    {
+        let mut db = self.db.lock().unwrap();
+        f(&mut db)
+    }
+
     /// Explicitly rolls back any in-flight transaction held by this session upon client disconnection.
     pub fn rollback_on_disconnect(&self) {
         let token = self.transaction.lock().unwrap().take();
