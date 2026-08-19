@@ -384,6 +384,9 @@ async fn handle_http_connection(
             && !path.starts_with("/auth/")
             && !path.starts_with("/storage/")
             && !path.starts_with("/assets/")
+            && path != "/health"
+            && path != "/metrics"
+            && path != "/.well-known/jwks.json"
         {
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\n{cors_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
@@ -878,7 +881,11 @@ async fn handle_http_connection(
             }
         } else if method == "GET" {
             match fdw_mgr.scan_table(table_name).await {
-                Ok(rows) => (200, "OK", serde_json::json!({ "rows": rows })),
+                Ok(rows) => (
+                    200,
+                    "OK",
+                    serde_json::json!({ "rows": rows.iter().map(|row| row.iter().map(value_to_json).collect::<Vec<_>>()).collect::<Vec<_>>() }),
+                ),
                 Err(e) => (
                     400,
                     "Bad Request",
@@ -904,7 +911,11 @@ async fn handle_http_connection(
             )
         } else if method == "GET" {
             match fdw_mgr.scan_table(table_name).await {
-                Ok(rows) => (200, "OK", serde_json::json!({ "rows": rows })),
+                Ok(rows) => (
+                    200,
+                    "OK",
+                    serde_json::json!({ "rows": rows.iter().map(|row| row.iter().map(value_to_json).collect::<Vec<_>>()).collect::<Vec<_>>() }),
+                ),
                 Err(e) => (
                     400,
                     "Bad Request",
