@@ -209,9 +209,14 @@ async fn handle_postgres_session_with_lenbuf(
                     .trim()
                     .to_string();
 
+                let sql_upper = sql.to_uppercase();
                 if sql.is_empty() {
                     // EmptyQueryResponse ('I', len 4)
                     socket.write_all(b"I\x00\x00\x00\x04").await?;
+                } else if sql_upper.starts_with("COPY ") && sql_upper.contains("FROM STDIN") {
+                    handle_copy_in(socket, &db, &sql, &exec_ctx).await?;
+                } else if sql_upper.starts_with("COPY ") && sql_upper.contains("TO STDOUT") {
+                    handle_copy_out(socket, &db, &sql, &exec_ctx).await?;
                 } else {
                     execute_and_reply_query(socket, &db, &sql, &exec_ctx).await?;
                 }
@@ -575,4 +580,210 @@ async fn write_error_response(writer: &mut TcpStream, code: &str, message: &str)
     writer.write_all(b"E").await?;
     writer.write_all(&len.to_be_bytes()).await?;
     writer.write_all(&payload).await
+}
+
+async fn handle_copy_in(
+    socket: &mut TcpStream,
+    db: &SharedDatabase,
+    sql: &str,
+    exec_ctx: &ExecutionContext,
+) -> io::Result<()> {
+    let clean_sql = sql.trim_matches('\0').trim();
+    let upper = clean_sql.to_uppercase();
+
+    let from_idx = match upper.find(" FROM ") {
+        Some(i) => i,
+        None => {
+            write_error_response(socket, "42601", "invalid COPY syntax, expected FROM").await?;
+            return Ok(());
+        }
+    };
+
+    let target_part = clean_sql[4..from_idx].trim();
+    let (table_name, cols_opt) = if let Some(open_p) = target_part.find('(') {
+        let name = target_part[..open_p].trim();
+        let close_p = target_part.rfind(')').unwrap_or(target_part.len());
+        let cols_str = &target_part[open_p + 1..close_p];
+        let cols: Vec<String> = cols_str
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+        (name, Some(cols))
+    } else {
+        (target_part, None)
+    };
+
+    let schema_cols = match db.table_schema(table_name) {
+        Some(s) => s.columns.into_iter().map(|c| c.name).collect::<Vec<_>>(),
+        None => {
+            write_error_response(
+                socket,
+                "42P01",
+                &format!("relation \"{table_name}\" does not exist"),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let columns = cols_opt.unwrap_or(schema_cols);
+    let col_count = columns.len();
+
+    // Send CopyInResponse ('G')
+    let msg_len = (4 + 1 + 2 + col_count * 2) as u32;
+    socket.write_all(b"G").await?;
+    socket.write_all(&msg_len.to_be_bytes()).await?;
+    socket.write_all(&[0]).await?; // Overall text format
+    socket.write_all(&(col_count as u16).to_be_bytes()).await?;
+    for _ in 0..col_count {
+        socket.write_all(&0u16.to_be_bytes()).await?;
+    }
+    socket.flush().await?;
+
+    let mut rows_copied = 0usize;
+    let mut len_buf = [0u8; 4];
+
+    loop {
+        let mut msg_type_buf = [0u8; 1];
+        if socket.read_exact(&mut msg_type_buf).await.is_err() {
+            break;
+        }
+        let msg_type = msg_type_buf[0];
+        socket.read_exact(&mut len_buf).await?;
+        let msg_len = u32::from_be_bytes(len_buf) as usize;
+        let mut msg_body = vec![0u8; msg_len.saturating_sub(4)];
+        socket.read_exact(&mut msg_body).await?;
+
+        match msg_type {
+            b'd' => {
+                let data_str = String::from_utf8_lossy(&msg_body);
+                for line in data_str.lines() {
+                    let trimmed = line.trim();
+                    if trimmed == "\\." || trimmed.is_empty() {
+                        continue;
+                    }
+                    let is_csv = clean_sql.to_uppercase().contains("CSV");
+                    let tokens: Vec<&str> = if is_csv {
+                        trimmed.split(',').map(|t| t.trim()).collect()
+                    } else {
+                        trimmed.split('\t').map(|t| t.trim()).collect()
+                    };
+
+                    if tokens.len() == columns.len() {
+                        let mut values_sql = Vec::new();
+                        for t in tokens {
+                            if t == "\\N" || t.eq_ignore_ascii_case("null") {
+                                values_sql.push("NULL".to_string());
+                            } else if let Ok(n) = t.parse::<i64>() {
+                                values_sql.push(n.to_string());
+                            } else if let Ok(f) = t.parse::<f64>() {
+                                values_sql.push(f.to_string());
+                            } else {
+                                let esc = t.replace('\'', "''");
+                                values_sql.push(format!("'{esc}'"));
+                            }
+                        }
+
+                        let insert_sql = format!(
+                            "INSERT INTO {table_name} ({}) VALUES ({})",
+                            columns.join(", "),
+                            values_sql.join(", ")
+                        );
+                        if db.execute_with_context(&insert_sql, exec_ctx).is_ok() {
+                            rows_copied += 1;
+                        }
+                    }
+                }
+            }
+            b'c' => {
+                break;
+            }
+            b'f' => {
+                write_error_response(socket, "57014", "COPY operation failed by client").await?;
+                return Ok(());
+            }
+            _ => break,
+        }
+    }
+
+    write_command_complete(socket, &format!("COPY {rows_copied}")).await
+}
+
+async fn handle_copy_out(
+    socket: &mut TcpStream,
+    db: &SharedDatabase,
+    sql: &str,
+    exec_ctx: &ExecutionContext,
+) -> io::Result<()> {
+    let clean_sql = sql.trim_matches('\0').trim();
+    let upper = clean_sql.to_uppercase();
+
+    let to_idx = match upper.find(" TO ") {
+        Some(i) => i,
+        None => {
+            write_error_response(socket, "42601", "invalid COPY syntax, expected TO").await?;
+            return Ok(());
+        }
+    };
+
+    let source_part = clean_sql[4..to_idx].trim();
+    let query_sql = if source_part.starts_with('(') && source_part.ends_with(')') {
+        source_part[1..source_part.len() - 1].trim().to_string()
+    } else {
+        format!("SELECT * FROM {source_part}")
+    };
+
+    match db.execute_with_context(&query_sql, exec_ctx) {
+        Ok(ExecResult::Rows { columns, rows }) => {
+            let col_count = columns.len();
+            let msg_len = (4 + 1 + 2 + col_count * 2) as u32;
+            socket.write_all(b"H").await?;
+            socket.write_all(&msg_len.to_be_bytes()).await?;
+            socket.write_all(&[0]).await?;
+            socket.write_all(&(col_count as u16).to_be_bytes()).await?;
+            for _ in 0..col_count {
+                socket.write_all(&0u16.to_be_bytes()).await?;
+            }
+
+            let mut row_count = 0usize;
+            for r in &rows {
+                let row_str = r
+                    .iter()
+                    .map(|v| match v {
+                        Value::Null => "\\N".to_string(),
+                        Value::Integer(i) => i.to_string(),
+                        Value::Float(f) => f.to_string(),
+                        Value::Text(s) => s.clone(),
+                        Value::Boolean(b) => {
+                            if *b {
+                                "t".to_string()
+                            } else {
+                                "f".to_string()
+                            }
+                        }
+                        Value::Json(j) => j.clone(),
+                        Value::Vector(v) => format!("{v:?}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+                    + "\n";
+
+                let data_bytes = row_str.as_bytes();
+                let d_len = (data_bytes.len() + 4) as u32;
+                socket.write_all(b"d").await?;
+                socket.write_all(&d_len.to_be_bytes()).await?;
+                socket.write_all(data_bytes).await?;
+                row_count += 1;
+            }
+
+            socket.write_all(b"c\x00\x00\x00\x04").await?;
+            write_command_complete(socket, &format!("COPY {row_count}")).await
+        }
+        Ok(_) => {
+            socket.write_all(b"c\x00\x00\x00\x04").await?;
+            write_command_complete(socket, "COPY 0").await
+        }
+        Err(e) => write_error_response(socket, "42P01", &e.to_string()).await,
+    }
 }
