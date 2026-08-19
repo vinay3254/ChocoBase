@@ -1,0 +1,8 @@
+[package]
+name = "rust-quickstart"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chocobase = { path = "../../sdk/chocobase-rs" }
+serde_json = "1"
