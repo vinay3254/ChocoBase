@@ -587,6 +587,13 @@ impl Database {
                     query: query.clone(),
                 })
             }
+            Expr::FtsSnippet { expr: inner, query } => {
+                let resolved_inner = self.resolve_subqueries_in_expr(inner, ctx)?;
+                Ok(Expr::FtsSnippet {
+                    expr: Box::new(resolved_inner),
+                    query: query.clone(),
+                })
+            }
             other => Ok(other.clone()),
         }
     }
