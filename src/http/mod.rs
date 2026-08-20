@@ -1294,8 +1294,8 @@ async fn handle_http_connection(
             &exec_ctx,
         )
         .await
-    } else if let Some(func_name) = path.strip_prefix("/v1/rpc/") {
-        handle_rpc(&db, func_name, &body, &exec_ctx).await
+    } else if let Some(func_name) = path.strip_prefix("/rest/v1/rpc/").or_else(|| path.strip_prefix("/v1/rpc/")).or_else(|| path.strip_prefix("/rpc/")) {
+        handle_rpc(&db, func_name, query_string, &body, &exec_ctx).await
     } else if let Some(table_name) = path.strip_prefix("/rest/v1/").or_else(|| path.strip_prefix("/v1/rest/")) {
         handle_rest_table_crud(&db, &method, table_name, query_string, &body, &exec_ctx).await
     } else {
@@ -1845,10 +1845,23 @@ async fn handle_oauth_callback(
 async fn handle_rpc(
     db: &SharedDatabase,
     func_name: &str,
+    query_str: &str,
     body: &str,
     ctx: &ExecutionContext,
 ) -> (u16, &'static str, serde_json::Value) {
-    let payload: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let mut payload: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    if payload.is_null() && !query_str.is_empty() {
+        let mut map = serde_json::Map::new();
+        for pair in query_str.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                map.insert(k.to_string(), serde_json::json!(v));
+            }
+        }
+        if !map.is_empty() {
+            payload = serde_json::Value::Object(map);
+        }
+    }
+
     match func_name {
         "version" => (
             200,
@@ -1862,19 +1875,62 @@ async fn handle_rpc(
         ),
         "echo" => (200, "OK", payload),
         _ => {
-            // Check if there's a stored SQL statement / function
             let safe_func = match sanitize_identifier(func_name) {
                 Ok(f) => f,
                 Err(err) => return (400, "Bad Request", serde_json::json!({ "error": err })),
             };
-            let sql = format!("SELECT * FROM {safe_func}()");
+
+            let args_sql = if let serde_json::Value::Object(map) = &payload {
+                let mut args = Vec::new();
+                for (_, v) in map {
+                    args.push(json_to_sql_literal(v));
+                }
+                args.join(", ")
+            } else if let serde_json::Value::Array(arr) = &payload {
+                let mut args = Vec::new();
+                for v in arr {
+                    args.push(json_to_sql_literal(v));
+                }
+                args.join(", ")
+            } else {
+                String::new()
+            };
+
+            let sql = format!("SELECT * FROM {safe_func}({args_sql})");
             match db.execute_with_context(&sql, ctx) {
+                Ok(ExecResult::Rows { columns, rows }) => {
+                    let json_rows: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|row| {
+                            let mut map = serde_json::Map::new();
+                            for (idx, col_name) in columns.iter().enumerate() {
+                                map.insert(col_name.clone(), value_to_json(&row[idx]));
+                            }
+                            serde_json::Value::Object(map)
+                        })
+                        .collect();
+                    (200, "OK", serde_json::Value::Array(json_rows))
+                }
+                Ok(ExecResult::Modified(n)) => (200, "OK", serde_json::json!({ "modified": n })),
                 Ok(res) => (200, "OK", serde_json::json!({ "result": res })),
-                Err(e) => (
-                    404,
-                    "Not Found",
-                    serde_json::json!({ "error": format!("function '{func_name}' not found: {e}") }),
-                ),
+                Err(e) => {
+                    let scalar_sql = format!("SELECT {safe_func}({args_sql})");
+                    match db.execute_with_context(&scalar_sql, ctx) {
+                        Ok(ExecResult::Rows { rows, .. }) => {
+                            if let Some(row) = rows.first() {
+                                if let Some(first_val) = row.first() {
+                                    return (200, "OK", value_to_json(first_val));
+                                }
+                            }
+                            (200, "OK", serde_json::Value::Null)
+                        }
+                        _ => (
+                            404,
+                            "Not Found",
+                            serde_json::json!({ "error": format!("function '{func_name}' not found: {e}") }),
+                        ),
+                    }
+                }
             }
         }
     }
