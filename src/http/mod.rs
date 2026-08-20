@@ -2558,7 +2558,12 @@ async fn handle_rest_table_crud(
                 }
 
                 if col_names.is_empty() {
-                    continue;
+                    if let Some(col) = schema.columns.first() {
+                        col_names.push(col.name.clone());
+                        col_values.push("NULL".to_string());
+                    } else {
+                        continue;
+                    }
                 }
 
                 let sql = format!(
