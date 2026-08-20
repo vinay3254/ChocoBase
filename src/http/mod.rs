@@ -2586,10 +2586,22 @@ async fn handle_rest_table_crud(
                             .iter()
                             .find(|c| c.is_primary_key)
                             .map(|c| c.name.clone());
+                        let conflict_col = query_params
+                            .get("on_conflict")
+                            .cloned()
+                            .or(pk_col_name);
+                        let is_ignore = pref_str.contains("resolution=ignore-duplicates")
+                            || query_params.get("resolution").map(|s| s.as_str())
+                                == Some("ignore-duplicates");
+                        if is_ignore {
+                            continue;
+                        }
+
                         let should_upsert = method == "PUT"
                             || query_params.contains_key("on_conflict")
                             || query_params.get("resolution").map(|s| s.as_str())
                                 == Some("merge-duplicates")
+                            || pref_str.contains("resolution=merge-duplicates")
                             || insert_err
                                 .to_string()
                                 .to_lowercase()
@@ -2599,20 +2611,20 @@ async fn handle_rest_table_crud(
                                 .to_lowercase()
                                 .contains("already exists");
 
-                        if let (true, Some(pk_col)) = (should_upsert, pk_col_name) {
-                            if let Some(pk_val) = obj.get(&pk_col) {
+                        if let (true, Some(col)) = (should_upsert, conflict_col) {
+                            if let Some(col_val) = obj.get(&col) {
                                 let mut set_clauses = Vec::new();
                                 for (k, v) in obj {
-                                    if k != &pk_col && schema.columns.iter().any(|c| &c.name == k) {
+                                    if k != &col && schema.columns.iter().any(|c| &c.name == k) {
                                         set_clauses
                                             .push(format!("{k} = {}", json_to_sql_literal(v)));
                                     }
                                 }
                                 if !set_clauses.is_empty() {
                                     let update_sql = format!(
-                                        "UPDATE {table} SET {} WHERE {pk_col} = {} RETURNING *",
+                                        "UPDATE {table} SET {} WHERE {col} = {} RETURNING *",
                                         set_clauses.join(", "),
-                                        json_to_sql_literal(pk_val)
+                                        json_to_sql_literal(col_val)
                                     );
                                     match db.execute_with_context(&update_sql, ctx) {
                                         Ok(ExecResult::Rows { columns, rows }) => {
