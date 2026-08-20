@@ -96,19 +96,21 @@ fn get_cors_header(origin_opt: Option<&str>) -> (String, bool) {
     let origins_env = std::env::var("CHOCOBASE_CORS_ORIGINS").unwrap_or_else(|_| "*".into());
     let origin = match origin_opt {
         Some(o) => o,
-        None => return (String::new(), false),
+        None => return (String::new(), true),
     };
+
+    let expose_hdr = "Access-Control-Expose-Headers: Content-Range, Range-Unit, Preference-Applied, Content-Length, ETag, X-Total-Count\r\n";
 
     if origins_env == "*" {
         (
-            format!("Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\n"),
+            format!("Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\n{expose_hdr}"),
             true,
         )
     } else {
         let allowed_list: Vec<&str> = origins_env.split(',').map(|s| s.trim()).collect();
         if allowed_list.contains(&origin) {
             (
-                format!("Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\n"),
+                format!("Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\n{expose_hdr}"),
                 true,
             )
         } else {
@@ -240,7 +242,7 @@ async fn handle_http_connection(
             return Ok(());
         }
         let resp = format!(
-            "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS, PUT\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, apikey\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS, PUT, HEAD\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, apikey, Prefer, Range, X-Client-Info, accept-profile, content-profile, x-relay-key, x-upsert\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         socket.write_all(resp.as_bytes()).await?;
         return Ok(());
