@@ -1089,6 +1089,35 @@ async fn handle_http_connection(
                 "engine": "ChocoBase"
             }),
         )
+    } else if method == "GET" && (path == "/auth/v1/health" || path == "/v1/auth/health") {
+        (
+            200,
+            "OK",
+            serde_json::json!({
+                "name": "GoTrue",
+                "version": "v2.158.0",
+                "description": "GoTrue is a user registration and authentication API",
+                "status": "healthy"
+            }),
+        )
+    } else if method == "GET" && (path == "/storage/v1/version" || path == "/v1/storage/version") {
+        (
+            200,
+            "OK",
+            serde_json::json!({
+                "version": "1.0.0",
+                "installed": true
+            }),
+        )
+    } else if method == "GET" && (path == "/realtime/v1/health" || path == "/v1/realtime/health") {
+        (
+            200,
+            "OK",
+            serde_json::json!({
+                "status": "healthy",
+                "version": "v2.28.0"
+            }),
+        )
     } else if method == "GET" && path == "/metrics" {
         let metrics_text = crate::metrics::MetricsRegistry::global().render_prometheus();
         (200, "OK", serde_json::Value::String(metrics_text))
