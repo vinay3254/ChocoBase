@@ -177,6 +177,19 @@ impl ControlPlane {
         map.get(project_id).cloned()
     }
 
+    pub fn resolve_project(&self, identifier: &str) -> Option<Project> {
+        let map = self.projects.lock().unwrap();
+        if let Some(p) = map.get(identifier) {
+            return Some(p.clone());
+        }
+        for p in map.values() {
+            if p.anon_key == identifier || p.service_role_key == identifier || p.id == identifier {
+                return Some(p.clone());
+            }
+        }
+        None
+    }
+
     pub fn pause_project(&self, project_id: &str) -> Result<Project, String> {
         let mut map = self.projects.lock().unwrap();
         if let Some(p) = map.get_mut(project_id) {
