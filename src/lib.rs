@@ -27,7 +27,7 @@ pub mod webhooks;
 pub use auth::{ExecutionContext, SessionClaims};
 pub use backup::{dump_database, restore_database};
 pub use branching::{BranchManager, BranchMetadata};
-pub use control_plane::{ControlPlane, Organization, Project, ProjectQuota, ProjectStatus, ResourceUsage};
+pub use control_plane::{BillingTier, ControlPlane, Organization, Project, ProjectQuota, ProjectStatus, ResourceUsage};
 pub use engine::{Database, ExecResult, SharedDatabase};
 pub use error::{DbError, Result};
 pub use extensions::{ExtensionInfo, PgCrypto, PgJwt, PgStatStatements, PgVector, UuidOssp};
