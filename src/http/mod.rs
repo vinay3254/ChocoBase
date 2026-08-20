@@ -2408,16 +2408,7 @@ async fn handle_rest_table_crud(
             }
 
             if let Some(order) = query_params.get("order") {
-                if let Some((col, dir)) = order.split_once('.') {
-                    let dir_sql = if dir.eq_ignore_ascii_case("desc") {
-                        "DESC"
-                    } else {
-                        "ASC"
-                    };
-                    sql.push_str(&format!(" ORDER BY {col} {dir_sql}"));
-                } else {
-                    sql.push_str(&format!(" ORDER BY {order} ASC"));
-                }
+                sql.push_str(&parse_postgrest_order(order));
             }
 
             let offset = query_params
@@ -2953,6 +2944,44 @@ fn parse_query_params(query: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+fn parse_postgrest_order(order_param: &str) -> String {
+    let mut order_clauses = Vec::new();
+    for part in order_param.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tokens: Vec<&str> = trimmed.split('.').collect();
+        if tokens.is_empty() {
+            continue;
+        }
+        let raw_col = tokens[0];
+        let col = format_filter_key(raw_col);
+        let mut dir = "ASC";
+        let mut nulls = "";
+
+        for token in &tokens[1..] {
+            if token.eq_ignore_ascii_case("desc") {
+                dir = "DESC";
+            } else if token.eq_ignore_ascii_case("asc") {
+                dir = "ASC";
+            } else if token.eq_ignore_ascii_case("nullsfirst") {
+                nulls = " NULLS FIRST";
+            } else if token.eq_ignore_ascii_case("nullslast") {
+                nulls = " NULLS LAST";
+            }
+        }
+
+        order_clauses.push(format!("{col} {dir}{nulls}"));
+    }
+
+    if order_clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", order_clauses.join(", "))
+    }
 }
 
 fn build_where_clauses(params: &HashMap<String, String>) -> Vec<String> {
