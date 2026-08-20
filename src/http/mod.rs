@@ -150,7 +150,7 @@ fn get_cors_header(origin_opt: Option<&str>) -> (String, bool) {
         None => return (String::new(), true),
     };
 
-    let expose_hdr = "Access-Control-Expose-Headers: Content-Range, Range-Unit, Preference-Applied, Content-Length, ETag, X-Total-Count\r\n";
+    let expose_hdr = "Access-Control-Expose-Headers: Content-Range, Range-Unit, Preference-Applied, Content-Length, ETag, X-Total-Count, Content-Profile, Accept-Profile\r\n";
 
     if origins_env == "*" {
         (
@@ -227,6 +227,8 @@ async fn handle_http_connection(
     let mut range_header = None;
     let mut prefer_header = None;
     let mut accept_header = None;
+    let mut accept_profile = None;
+    let mut content_profile = None;
     let mut ws_upgrade = false;
     let mut ws_key = None;
     let mut content_length = 0usize;
@@ -253,6 +255,10 @@ async fn handle_http_connection(
                 prefer_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("accept") {
                 accept_header = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("accept-profile") {
+                accept_profile = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("content-profile") {
+                content_profile = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("upgrade")
                 && v_trim.eq_ignore_ascii_case("websocket")
             {
@@ -1407,6 +1413,12 @@ async fn handle_http_connection(
     } else if let Some(func_name) = path.strip_prefix("/rest/v1/rpc/").or_else(|| path.strip_prefix("/v1/rpc/")).or_else(|| path.strip_prefix("/rpc/")) {
         handle_rpc(&db, func_name, query_string, &body, &exec_ctx).await
     } else if let Some(table_name) = path.strip_prefix("/rest/v1/").or_else(|| path.strip_prefix("/v1/rest/")) {
+        let schema_profile = if method == "GET" || method == "HEAD" {
+            accept_profile.as_deref().or(content_profile.as_deref())
+        } else {
+            content_profile.as_deref().or(accept_profile.as_deref())
+        };
+
         let (code, text, json, cr_opt, pref_opt) = handle_rest_table_crud(
             &db,
             &method,
@@ -1416,8 +1428,12 @@ async fn handle_http_connection(
             &exec_ctx,
             prefer_header.as_deref(),
             accept_header.as_deref(),
+            schema_profile,
         )
         .await;
+        if let Some(prof) = schema_profile {
+            custom_headers.push_str(&format!("Content-Profile: {prof}\r\n"));
+        }
         if let Some(cr) = cr_opt {
             custom_headers.push_str(&format!("Content-Range: {cr}\r\nRange-Unit: items\r\n"));
         }
@@ -2368,7 +2384,24 @@ async fn handle_rest_table_crud(
     ctx: &ExecutionContext,
     prefer_header: Option<&str>,
     accept_header: Option<&str>,
+    schema_profile: Option<&str>,
 ) -> (u16, &'static str, serde_json::Value, Option<String>, Option<String>) {
+    let resolved_table = if let Some(prof) = schema_profile {
+        if !table.contains('.') && prof != "public" {
+            let qualified = format!("{prof}.{table}");
+            if db.table_schema(&qualified).is_some() {
+                qualified
+            } else {
+                table.to_string()
+            }
+        } else {
+            table.to_string()
+        }
+    } else {
+        table.to_string()
+    };
+    let table = resolved_table.as_str();
+
     let schema = match db.table_schema(table) {
         Some(s) => s,
         None => {
