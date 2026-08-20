@@ -82,6 +82,49 @@ where
                             subscription = None;
                             write_response(&mut writer, &Response::Unsubscribed).await?;
                         }
+                        Ok(Some(Request::CopyIn { table, rows })) => {
+                            let mut count = 0;
+                            let _ = db.execute_with_context("BEGIN TRANSACTION;", &exec_ctx);
+                            let mut err = None;
+                            for row in &rows {
+                                let row_strs: Vec<String> = row.iter().map(|v| match v {
+                                    crate::Value::Integer(i) => i.to_string(),
+                                    crate::Value::Float(f) => f.to_string(),
+                                    crate::Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+                                    crate::Value::Boolean(b) => b.to_string(),
+                                    crate::Value::Null => "NULL".to_string(),
+                                    crate::Value::Json(j) => format!("'{}'", j.replace('\'', "''")),
+                                    crate::Value::Vector(vec) => format!("'{}'", serde_json::to_string(vec).unwrap_or_default()),
+                                }).collect();
+                                let sql = format!("INSERT INTO {table} VALUES ({});", row_strs.join(", "));
+                                if let Err(e) = db.execute_with_context(&sql, &exec_ctx) {
+                                    err = Some(e);
+                                    break;
+                                }
+                                count += 1;
+                            }
+                            if let Some(e) = err {
+                                let _ = db.execute_with_context("ROLLBACK;", &exec_ctx);
+                                write_response(&mut writer, &Response::Error(e.to_string())).await?;
+                            } else {
+                                let _ = db.execute_with_context("COMMIT;", &exec_ctx);
+                                write_response(&mut writer, &Response::CopyDone { rows_copied: count }).await?;
+                            }
+                        }
+                        Ok(Some(Request::CopyOut { table })) => {
+                            let sql = format!("SELECT * FROM {table};");
+                            match db.execute_with_context(&sql, &exec_ctx) {
+                                Ok(crate::ExecResult::Rows { rows, .. }) => {
+                                    write_response(&mut writer, &Response::CopyData { rows }).await?;
+                                }
+                                Ok(_) => {
+                                    write_response(&mut writer, &Response::CopyData { rows: vec![] }).await?;
+                                }
+                                Err(err) => {
+                                    write_response(&mut writer, &Response::Error(err.to_string())).await?;
+                                }
+                            }
+                        }
                         Ok(None) => break,
                         Err(e) => {
                             let _ = write_response(&mut writer, &Response::Error(e.to_string())).await;
@@ -133,6 +176,49 @@ where
                 }
                 Ok(Some(Request::Unsubscribe)) => {
                     write_response(&mut writer, &Response::Unsubscribed).await?;
+                }
+                Ok(Some(Request::CopyIn { table, rows })) => {
+                    let mut count = 0;
+                    let _ = db.execute_with_context("BEGIN TRANSACTION;", &exec_ctx);
+                    let mut err = None;
+                    for row in &rows {
+                        let row_strs: Vec<String> = row.iter().map(|v| match v {
+                            crate::Value::Integer(i) => i.to_string(),
+                            crate::Value::Float(f) => f.to_string(),
+                            crate::Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+                            crate::Value::Boolean(b) => b.to_string(),
+                            crate::Value::Null => "NULL".to_string(),
+                            crate::Value::Json(j) => format!("'{}'", j.replace('\'', "''")),
+                            crate::Value::Vector(vec) => format!("'{}'", serde_json::to_string(vec).unwrap_or_default()),
+                        }).collect();
+                        let sql = format!("INSERT INTO {table} VALUES ({});", row_strs.join(", "));
+                        if let Err(e) = db.execute_with_context(&sql, &exec_ctx) {
+                            err = Some(e);
+                            break;
+                        }
+                        count += 1;
+                    }
+                    if let Some(e) = err {
+                        let _ = db.execute_with_context("ROLLBACK;", &exec_ctx);
+                        write_response(&mut writer, &Response::Error(e.to_string())).await?;
+                    } else {
+                        let _ = db.execute_with_context("COMMIT;", &exec_ctx);
+                        write_response(&mut writer, &Response::CopyDone { rows_copied: count }).await?;
+                    }
+                }
+                Ok(Some(Request::CopyOut { table })) => {
+                    let sql = format!("SELECT * FROM {table};");
+                    match db.execute_with_context(&sql, &exec_ctx) {
+                        Ok(crate::ExecResult::Rows { rows, .. }) => {
+                            write_response(&mut writer, &Response::CopyData { rows }).await?;
+                        }
+                        Ok(_) => {
+                            write_response(&mut writer, &Response::CopyData { rows: vec![] }).await?;
+                        }
+                        Err(err) => {
+                            write_response(&mut writer, &Response::Error(err.to_string())).await?;
+                        }
+                    }
                 }
                 Ok(None) => break,
                 Err(e) => {
