@@ -169,7 +169,7 @@ impl ExecutionContext {
     }
 
     pub fn authenticated(user_id: i64, role: &str) -> Self {
-        let is_admin = role == "admin";
+        let is_admin = role == "admin" || role == "service_role";
         Self {
             user_id: Some(user_id),
             username: None,
@@ -180,7 +180,7 @@ impl ExecutionContext {
     }
 
     pub fn from_claims(claims: &SessionClaims) -> Self {
-        let is_admin = claims.role == "admin";
+        let is_admin = claims.role == "admin" || claims.role == "service_role";
         Self {
             user_id: Some(claims.sub),
             username: Some(claims.username.clone()),
