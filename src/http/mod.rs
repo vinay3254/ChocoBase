@@ -974,17 +974,19 @@ async fn handle_http_connection(
                 ),
             }
         }
-    } else if method == "POST" && path == "/v1/auth/signup" {
+    } else if method == "POST" && (path == "/v1/auth/signup" || path == "/auth/v1/signup") {
         handle_auth_signup(&db, &body).await
-    } else if method == "POST" && path == "/v1/auth/token" {
+    } else if method == "POST" && (path == "/v1/auth/token" || path == "/auth/v1/token") {
         handle_auth_token(&db, &body).await
-    } else if method == "POST" && path == "/v1/auth/refresh" {
+    } else if method == "POST" && (path == "/v1/auth/refresh" || path == "/auth/v1/refresh" || path == "/auth/v1/token/refresh") {
         handle_auth_refresh(&db, &body).await
-    } else if method == "POST" && path == "/v1/auth/logout" {
+    } else if method == "POST" && (path == "/v1/auth/logout" || path == "/auth/v1/logout") {
         handle_auth_logout(&db, &body).await
-    } else if (method == "POST" || method == "GET") && path == "/v1/auth/oauth/authorize" {
+    } else if method == "GET" && (path == "/v1/auth/user" || path == "/auth/v1/user") {
+        handle_auth_user(&db, &exec_ctx).await
+    } else if (method == "POST" || method == "GET") && (path == "/v1/auth/oauth/authorize" || path == "/auth/v1/authorize") {
         handle_oauth_authorize(query_string, &body).await
-    } else if method == "POST" && path == "/v1/auth/oauth/callback" {
+    } else if method == "POST" && (path == "/v1/auth/oauth/callback" || path == "/auth/v1/callback") {
         handle_oauth_callback(&db, &body).await
     } else if path.starts_with("/functions/v1") || path.starts_with("/v1/functions/v1") {
         functions::handle_functions_request(&functions_reg, &db, &method, path, &body, &exec_ctx)
@@ -1893,13 +1895,17 @@ async fn handle_auth_signup(
         }
     };
 
-    let username = match payload.get("username").and_then(|u| u.as_str()) {
+    let username = match payload
+        .get("email")
+        .or_else(|| payload.get("username"))
+        .and_then(|u| u.as_str())
+    {
         Some(u) => u,
         None => {
             return (
                 400,
                 "Bad Request",
-                serde_json::json!({ "error": "missing username field" }),
+                serde_json::json!({ "error": "missing email or username field" }),
             )
         }
     };
@@ -2001,13 +2007,17 @@ async fn handle_auth_token(
         }
     };
 
-    let username = match payload.get("username").and_then(|u| u.as_str()) {
+    let username = match payload
+        .get("email")
+        .or_else(|| payload.get("username"))
+        .and_then(|u| u.as_str())
+    {
         Some(u) => u,
         None => {
             return (
                 400,
                 "Bad Request",
-                serde_json::json!({ "error": "missing username field" }),
+                serde_json::json!({ "error": "missing email or username field" }),
             )
         }
     };
@@ -2091,6 +2101,70 @@ async fn handle_auth_token(
             serde_json::json!({ "error": "authentication failed" }),
         ),
     }
+}
+
+async fn handle_auth_user(
+    db: &SharedDatabase,
+    ctx: &ExecutionContext,
+) -> (u16, &'static str, serde_json::Value) {
+    if !ctx.is_authenticated() {
+        return (
+            401,
+            "Unauthorized",
+            serde_json::json!({ "error": "Unauthorized", "message": "Valid authentication credentials required" }),
+        );
+    }
+
+    let (user_id, username, role) = if let Some(id) = ctx.user_id {
+        let sql = format!("SELECT id, username, role FROM _users WHERE id = {id}");
+        if let Ok(ExecResult::Rows { rows, .. }) = db.execute_with_context(&sql, &ExecutionContext::admin()) {
+            if let Some(row) = rows.first() {
+                let u_name = match &row[1] { Value::Text(s) => s.clone(), _ => format!("user_{id}") };
+                let u_role = match &row[2] { Value::Text(s) => s.clone(), _ => ctx.role.clone().unwrap_or_else(|| "authenticated".into()) };
+                (id, u_name, u_role)
+            } else {
+                (id, ctx.username.clone().unwrap_or_else(|| format!("user_{id}")), ctx.role.clone().unwrap_or_else(|| "authenticated".into()))
+            }
+        } else {
+            (id, ctx.username.clone().unwrap_or_else(|| format!("user_{id}")), ctx.role.clone().unwrap_or_else(|| "authenticated".into()))
+        }
+    } else if let Some(ref name) = ctx.username {
+        let safe_name = name.replace('\'', "''");
+        let sql = format!("SELECT id, username, role FROM _users WHERE username = '{safe_name}'");
+        if let Ok(ExecResult::Rows { rows, .. }) = db.execute_with_context(&sql, &ExecutionContext::admin()) {
+            if let Some(row) = rows.first() {
+                let id = match &row[0] { Value::Integer(i) => *i, _ => 1 };
+                let u_role = match &row[2] { Value::Text(s) => s.clone(), _ => ctx.role.clone().unwrap_or_else(|| "authenticated".into()) };
+                (id, name.clone(), u_role)
+            } else {
+                (1, name.clone(), ctx.role.clone().unwrap_or_else(|| "authenticated".into()))
+            }
+        } else {
+            (1, name.clone(), ctx.role.clone().unwrap_or_else(|| "authenticated".into()))
+        }
+    } else {
+        (1, "authenticated_user".to_string(), ctx.role.clone().unwrap_or_else(|| "authenticated".into()))
+    };
+
+    (
+        200,
+        "OK",
+        serde_json::json!({
+            "id": user_id,
+            "aud": "authenticated",
+            "role": role,
+            "email": username,
+            "app_metadata": {
+                "provider": "email",
+                "providers": ["email"]
+            },
+            "user_metadata": {
+                "username": username
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }),
+    )
 }
 
 async fn handle_rest_table_crud(
