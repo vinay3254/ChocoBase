@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <PackageId>ChocoBase</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>ChocoBase Team</Authors>
+    <Description>Official C# and .NET client library for ChocoBase database platform (Unity, MAUI, ASP.NET, Blazor).</Description>
+    <PackageProjectUrl>https://github.com/vinay3254/ChocoBase</PackageProjectUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
