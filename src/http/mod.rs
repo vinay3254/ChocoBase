@@ -1292,7 +1292,7 @@ async fn handle_http_connection(
         .await
     } else if let Some(func_name) = path.strip_prefix("/v1/rpc/") {
         handle_rpc(&db, func_name, &body, &exec_ctx).await
-    } else if let Some(table_name) = path.strip_prefix("/v1/rest/") {
+    } else if let Some(table_name) = path.strip_prefix("/rest/v1/").or_else(|| path.strip_prefix("/v1/rest/")) {
         handle_rest_table_crud(&db, &method, table_name, query_string, &body, &exec_ctx).await
     } else {
         (
