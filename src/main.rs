@@ -202,6 +202,72 @@ async fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        "diff" => {
+            let db1_file = match args.get(2) {
+                Some(f) => f.as_str(),
+                None => {
+                    eprintln!("Usage: dbengine diff <source_db> <target_db>");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let db2_file = match args.get(3) {
+                Some(f) => f.as_str(),
+                None => {
+                    eprintln!("Usage: dbengine diff <source_db> <target_db>");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let mut db1 = match Database::open(Path::new(db1_file)) {
+                Ok(db) => db,
+                Err(e) => {
+                    eprintln!("error opening source database '{db1_file}': {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let mut db2 = match Database::open(Path::new(db2_file)) {
+                Ok(db) => db,
+                Err(e) => {
+                    eprintln!("error opening target database '{db2_file}': {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let tables1 = db1.list_tables();
+            let tables2 = db2.list_tables();
+
+            println!("-- Schema Migration Diff: {} -> {}", db1_file, db2_file);
+            let mut diff_count = 0;
+
+            for table in &tables2 {
+                if !tables1.contains(table) {
+                    if let Some(schema) = db2.table_schema(table) {
+                        let mut col_defs = Vec::new();
+                        for col in &schema.columns {
+                            let type_str = match col.ty {
+                                dbengine::types::value::ColumnType::Integer => "INTEGER",
+                                dbengine::types::value::ColumnType::Float => "FLOAT",
+                                dbengine::types::value::ColumnType::Text => "TEXT",
+                                dbengine::types::value::ColumnType::Boolean => "BOOLEAN",
+                                dbengine::types::value::ColumnType::Json => "JSON",
+                                dbengine::types::value::ColumnType::Vector(_) => "VECTOR",
+                            };
+                            let pk = if col.is_primary_key { " PRIMARY KEY" } else { "" };
+                            let not_null = if col.not_null && !col.is_primary_key { " NOT NULL" } else { "" };
+                            col_defs.push(format!("    {} {}{}{}", col.name, type_str, pk, not_null));
+                        }
+                        println!("CREATE TABLE {} (\n{}\n);\n", table, col_defs.join(",\n"));
+                        diff_count += 1;
+                    }
+                }
+            }
+
+            if diff_count == 0 {
+                println!("-- Schemas are in sync. No changes detected.");
+            }
+            ExitCode::SUCCESS
+        }
         "gen" | "generate" => {
             let _subcmd = args.get(2).map(|s| s.as_str()).unwrap_or("types");
             let lang = args.get(3).map(|s| s.as_str()).unwrap_or("typescript");
