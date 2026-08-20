@@ -137,7 +137,10 @@ pub async fn handle_realtime_channel_request(
     body: &str,
     ctx: &ExecutionContext,
 ) -> (u16, &'static str, serde_json::Value) {
-    let subpath = path.strip_prefix("/v1/realtime/v1").unwrap_or(path);
+    let subpath = path
+        .strip_prefix("/v1/realtime/v1")
+        .or_else(|| path.strip_prefix("/realtime/v1"))
+        .unwrap_or(path);
 
     if subpath.starts_with("/broadcast/") && method == "POST" {
         let channel = subpath["/broadcast/".len()..].trim_matches('/');
