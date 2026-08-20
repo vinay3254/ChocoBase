@@ -2944,6 +2944,15 @@ fn parse_select_embedding(select_str: &str) -> (Vec<String>, Vec<EmbeddedRelatio
     let mut current = String::new();
     let mut depth = 0;
 
+    let format_select_col = |col_expr: &str| -> String {
+        if let Some((alias, col)) = col_expr.split_once(':') {
+            let formatted_col = format_filter_key(col.trim());
+            format!("{formatted_col} AS {}", alias.trim())
+        } else {
+            format_filter_key(col_expr.trim())
+        }
+    };
+
     for c in select_str.chars() {
         match c {
             '(' => {
@@ -2970,7 +2979,7 @@ fn parse_select_embedding(select_str: &str) -> (Vec<String>, Vec<EmbeddedRelatio
                             columns: if rel_cols.is_empty() || rel_cols == "*" { "*".to_string() } else { rel_cols.to_string() },
                         });
                     } else {
-                        top_cols.push(trimmed);
+                        top_cols.push(format_select_col(&trimmed));
                     }
                 }
                 current.clear();
@@ -2996,7 +3005,7 @@ fn parse_select_embedding(select_str: &str) -> (Vec<String>, Vec<EmbeddedRelatio
                 columns: if rel_cols.is_empty() || rel_cols == "*" { "*".to_string() } else { rel_cols.to_string() },
             });
         } else {
-            top_cols.push(trimmed);
+            top_cols.push(format_select_col(&trimmed));
         }
     }
 
