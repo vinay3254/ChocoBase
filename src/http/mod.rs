@@ -92,6 +92,57 @@ impl HttpServer {
     }
 }
 
+fn json_rows_to_csv(rows: &[serde_json::Value]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let mut headers = Vec::new();
+    if let Some(first_obj) = rows.first().and_then(|r| r.as_object()) {
+        for k in first_obj.keys() {
+            headers.push(k.clone());
+        }
+    }
+
+    if headers.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str(&headers.join(","));
+    out.push('\n');
+
+    for row_val in rows {
+        if let Some(obj) = row_val.as_object() {
+            let line_vals: Vec<String> = headers
+                .iter()
+                .map(|h| match obj.get(h) {
+                    Some(serde_json::Value::Null) | None => String::new(),
+                    Some(serde_json::Value::String(s)) => {
+                        if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+                            format!("\"{}\"", s.replace('"', "\"\""))
+                        } else {
+                            s.clone()
+                        }
+                    }
+                    Some(v) => {
+                        let s = v.to_string();
+                        if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+                            format!("\"{}\"", s.replace('"', "\"\""))
+                        } else {
+                            s
+                        }
+                    }
+                })
+                .collect();
+            out.push_str(&line_vals.join(","));
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
 fn get_cors_header(origin_opt: Option<&str>) -> (String, bool) {
     let origins_env = std::env::var("CHOCOBASE_CORS_ORIGINS").unwrap_or_else(|_| "*".into());
     let origin = match origin_opt {
@@ -1367,6 +1418,16 @@ async fn handle_http_connection(
         (
             "application/vnd.pgrst.object+json; charset=utf-8",
             serde_json::to_vec(&json_body).unwrap_or_default(),
+        )
+    } else if accept_header.as_deref().map(|a| a.contains("text/csv")).unwrap_or(false) && status_code == 200 {
+        let csv_str = match &json_body {
+            serde_json::Value::Array(arr) => json_rows_to_csv(arr),
+            obj @ serde_json::Value::Object(_) => json_rows_to_csv(&[obj.clone()]),
+            _ => String::new(),
+        };
+        (
+            "text/csv; charset=utf-8",
+            csv_str.into_bytes(),
         )
     } else {
         (
