@@ -181,6 +181,53 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        "seed" => {
+            let seed_file = args.get(2).map(|s| s.as_str()).unwrap_or("seed.sql");
+            let db_file = args.get(3).map(|s| s.as_str()).unwrap_or("chocobase.db");
+
+            let seed_path = Path::new(seed_file);
+            if !seed_path.exists() {
+                eprintln!("error: seed file '{seed_file}' does not exist");
+                return ExitCode::FAILURE;
+            }
+
+            let sql_content = match std::fs::read_to_string(seed_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error reading seed file '{seed_file}': {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let path = Path::new(db_file);
+            let mut db = match Database::open(path) {
+                Ok(db) => db,
+                Err(_) => match Database::create(path) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        eprintln!("error opening database '{db_file}': {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+            };
+
+            let mut success_count = 0;
+            for stmt in sql_content.split(';') {
+                let s = stmt.trim();
+                if s.is_empty() || s.starts_with("--") {
+                    continue;
+                }
+                match db.execute(&format!("{s};")) {
+                    Ok(_) => success_count += 1,
+                    Err(e) => {
+                        eprintln!("warning executing statement in '{seed_file}': {e}");
+                    }
+                }
+            }
+
+            println!("🌱 Seeded database '{db_file}' with {success_count} statement(s) from '{seed_file}'");
+            ExitCode::SUCCESS
+        }
         "status" => {
             let db_file = args.get(2).map(|s| s.as_str()).unwrap_or("chocobase.db");
             let path = Path::new(db_file);
