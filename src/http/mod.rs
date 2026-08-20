@@ -167,6 +167,9 @@ async fn handle_http_connection(
 
     // Parse headers
     let mut auth_token = None;
+    let mut apikey_header = None;
+    let mut project_header = None;
+    let mut host_header = None;
     let mut origin_header = None;
     let mut range_header = None;
     let mut ws_upgrade = false;
@@ -181,6 +184,12 @@ async fn handle_http_connection(
                 if v_trim.to_lowercase().starts_with("bearer ") {
                     auth_token = Some(v_trim[7..].trim().to_string());
                 }
+            } else if k_trim.eq_ignore_ascii_case("apikey") {
+                apikey_header = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("x-project-id") || k_trim.eq_ignore_ascii_case("x-project-ref") {
+                project_header = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("host") {
+                host_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("origin") {
                 origin_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("range") {
@@ -1200,6 +1209,26 @@ async fn handle_http_connection(
             serde_json::to_vec(&json_body).unwrap_or_default(),
         )
     };
+
+    // Record live egress telemetry for tenant project
+    let host_subdomain_project = host_header.as_deref().and_then(|h| {
+        if let Some((sub, _)) = h.split_once('.') {
+            if sub.starts_with("prj_") {
+                Some(sub)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
+    let project_to_meter = project_header
+        .as_deref()
+        .or(host_subdomain_project)
+        .or_else(|| apikey_header.as_deref())
+        .unwrap_or("prj_default");
+    crate::control_plane::ControlPlane::global().record_egress(project_to_meter, body_bytes.len() as u64);
 
     let header = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{cors_headers}X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
