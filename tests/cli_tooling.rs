@@ -88,3 +88,34 @@ fn test_cli_dump_and_restore_file_workflow() {
         panic!("expected rows");
     }
 }
+
+#[test]
+fn test_cli_seed_sql_file_workflow() {
+    let dir = tempdir().unwrap();
+    let db_file = dir.path().join("seeded.db");
+    let seed_file = dir.path().join("seed.sql");
+
+    let seed_sql = "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n\
+                    INSERT INTO customers (id, name) VALUES (1, 'Alice');\n\
+                    INSERT INTO customers (id, name) VALUES (2, 'Bob');";
+    fs::write(&seed_file, seed_sql).unwrap();
+
+    let mut db = Database::create(&db_file).unwrap();
+    let content = fs::read_to_string(&seed_file).unwrap();
+    for stmt in content.split(';') {
+        let s = stmt.trim();
+        if !s.is_empty() {
+            let _ = db.execute(&format!("{s};"));
+        }
+    }
+
+    let res = db.execute("SELECT id, name FROM customers ORDER BY id ASC").unwrap();
+    match res {
+        ExecResult::Rows { rows, .. } => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][1], Value::Text("Alice".to_string()));
+            assert_eq!(rows[1][1], Value::Text("Bob".to_string()));
+        }
+        other => panic!("expected rows, got {:?}", other),
+    }
+}
