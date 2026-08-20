@@ -3032,8 +3032,82 @@ fn parse_single_filter(key: &str, val: &str) -> Option<String> {
                     } else {
                         format!("{key} IS NOT NULL")
                     }
+                } else if rhs.eq_ignore_ascii_case("true") {
+                    if is_not {
+                        format!("{key} = FALSE")
+                    } else {
+                        format!("{key} = TRUE")
+                    }
+                } else if rhs.eq_ignore_ascii_case("false") {
+                    if is_not {
+                        format!("{key} = TRUE")
+                    } else {
+                        format!("{key} = FALSE")
+                    }
                 } else {
                     format!("{key} IS NULL")
+                }
+            }
+            "cs" => {
+                let cleaned = rhs.trim_start_matches('{').trim_end_matches('}').trim_start_matches('[').trim_end_matches(']');
+                let items: Vec<&str> = cleaned.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                if items.is_empty() {
+                    let pattern = rhs.replace('\'', "''");
+                    if is_not {
+                        format!("{key} NOT LIKE '%{pattern}%'")
+                    } else {
+                        format!("{key} LIKE '%{pattern}%'")
+                    }
+                } else {
+                    let sub_clauses: Vec<String> = items
+                        .iter()
+                        .map(|item| {
+                            let item_clean = item.trim_matches('"').trim_matches('\'').replace('\'', "''");
+                            if is_not {
+                                format!("{key} NOT LIKE '%{item_clean}%'")
+                            } else {
+                                format!("{key} LIKE '%{item_clean}%'")
+                            }
+                        })
+                        .collect();
+                    if is_not {
+                        format!("({})", sub_clauses.join(" OR "))
+                    } else {
+                        format!("({})", sub_clauses.join(" AND "))
+                    }
+                }
+            }
+            "cd" => {
+                let pattern = rhs.replace('\'', "''");
+                if is_not {
+                    format!("{key} NOT LIKE '%{pattern}%'")
+                } else {
+                    format!("{key} LIKE '%{pattern}%'")
+                }
+            }
+            "ov" => {
+                let cleaned = rhs.trim_start_matches('{').trim_end_matches('}').trim_start_matches('[').trim_end_matches(']');
+                let items: Vec<&str> = cleaned.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                if items.is_empty() {
+                    let pattern = rhs.replace('\'', "''");
+                    if is_not {
+                        format!("{key} NOT LIKE '%{pattern}%'")
+                    } else {
+                        format!("{key} LIKE '%{pattern}%'")
+                    }
+                } else {
+                    let sub_clauses: Vec<String> = items
+                        .iter()
+                        .map(|item| {
+                            let item_clean = item.trim_matches('"').trim_matches('\'').replace('\'', "''");
+                            format!("{key} LIKE '%{item_clean}%'")
+                        })
+                        .collect();
+                    if is_not {
+                        format!("NOT ({})", sub_clauses.join(" OR "))
+                    } else {
+                        format!("({})", sub_clauses.join(" OR "))
+                    }
                 }
             }
             "in" => {
