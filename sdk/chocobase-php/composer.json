@@ -1,0 +1,16 @@
+{
+  "name": "chocobase/chocobase-php",
+  "description": "Official PHP and Laravel client library for ChocoBase database platform.",
+  "type": "library",
+  "license": "MIT",
+  "autoload": {
+    "psr-4": {
+      "ChocoBase\\": "src/"
+    }
+  },
+  "require": {
+    "php": ">=7.4 || >=8.0",
+    "ext-json": "*",
+    "ext-curl": "*"
+  }
+}
