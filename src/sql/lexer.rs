@@ -232,6 +232,33 @@ pub fn tokenize(src: &str) -> Result<Vec<SpannedToken>, ParseError> {
                     offset: start,
                 });
             }
+            '"' => {
+                chars.next();
+                let mut s = String::new();
+                loop {
+                    match chars.next() {
+                        None => {
+                            return Err(ParseError::Syntax {
+                                offset: start,
+                                message: "unterminated quoted identifier".into(),
+                            })
+                        }
+                        Some((_, '"')) => {
+                            if let Some(&(_, '"')) = chars.peek() {
+                                chars.next();
+                                s.push('"');
+                            } else {
+                                break;
+                            }
+                        }
+                        Some((_, ch)) => s.push(ch),
+                    }
+                }
+                tokens.push(SpannedToken {
+                    token: Token::Identifier(s),
+                    offset: start,
+                });
+            }
             c if c.is_ascii_digit() => {
                 let mut end = start + c.len_utf8();
                 chars.next();
