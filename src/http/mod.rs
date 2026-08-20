@@ -1042,6 +1042,81 @@ async fn handle_http_connection(
                 ]
             }),
         )
+    } else if method == "GET" && (path == "/v1/openapi.json" || path == "/rest/v1" || path == "/rest/v1/") {
+        let tables = db.list_tables();
+        let mut paths_map = serde_json::Map::new();
+        let mut schemas_map = serde_json::Map::new();
+
+        for table in &tables {
+            if let Some(schema) = db.table_schema(table) {
+                let path_key = format!("/rest/v1/{table}");
+                let mut path_item = serde_json::Map::new();
+
+                path_item.insert("get".to_string(), serde_json::json!({
+                    "summary": format!("Retrieve rows from {table}"),
+                    "parameters": [
+                        { "name": "select", "in": "query", "description": "Columns to select", "schema": { "type": "string" } },
+                        { "name": "order", "in": "query", "description": "Column order", "schema": { "type": "string" } },
+                        { "name": "limit", "in": "query", "description": "Row limit", "schema": { "type": "integer" } }
+                    ],
+                    "responses": {
+                        "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": format!("#/components/schemas/{table}") } } } } }
+                    }
+                }));
+
+                path_item.insert("post".to_string(), serde_json::json!({
+                    "summary": format!("Insert rows into {table}"),
+                    "requestBody": {
+                        "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{table}") } } }
+                    },
+                    "responses": {
+                        "201": { "description": "Created" }
+                    }
+                }));
+
+                path_item.insert("delete".to_string(), serde_json::json!({
+                    "summary": format!("Delete rows from {table}"),
+                    "responses": {
+                        "200": { "description": "OK" }
+                    }
+                }));
+
+                paths_map.insert(path_key, serde_json::Value::Object(path_item));
+
+                let mut props = serde_json::Map::new();
+                for col in &schema.columns {
+                    let col_type = match col.ty {
+                        crate::types::value::ColumnType::Integer => "integer",
+                        crate::types::value::ColumnType::Float => "number",
+                        crate::types::value::ColumnType::Text => "string",
+                        crate::types::value::ColumnType::Boolean => "boolean",
+                        crate::types::value::ColumnType::Json => "object",
+                        crate::types::value::ColumnType::Vector(_) => "array",
+                    };
+                    props.insert(col.name.clone(), serde_json::json!({ "type": col_type }));
+                }
+
+                schemas_map.insert(table.clone(), serde_json::json!({
+                    "type": "object",
+                    "properties": props
+                }));
+            }
+        }
+
+        let doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {
+                "title": "ChocoBase Auto-Generated API",
+                "version": "1.0.0",
+                "description": "Dynamic PostgREST and relational REST API specification for active ChocoBase schema"
+            },
+            "paths": paths_map,
+            "components": {
+                "schemas": schemas_map
+            }
+        });
+
+        (200, "OK", doc)
     } else if path == "/v1/admin/organizations" {
         let cp = crate::control_plane::ControlPlane::global();
         if !exec_ctx.is_admin {
