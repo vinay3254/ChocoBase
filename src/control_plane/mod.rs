@@ -21,6 +21,39 @@ pub enum ProjectStatus {
     Deleting,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingTier {
+    Free,
+    Pro,
+    Enterprise,
+}
+
+impl BillingTier {
+    pub fn quota(&self) -> ProjectQuota {
+        match self {
+            BillingTier::Free => ProjectQuota {
+                max_storage_mb: 500,
+                max_egress_mb: 2048,
+                max_realtime_connections: 200,
+                max_functions: 10,
+            },
+            BillingTier::Pro => ProjectQuota {
+                max_storage_mb: 8192,
+                max_egress_mb: 51200,
+                max_realtime_connections: 5000,
+                max_functions: 100,
+            },
+            BillingTier::Enterprise => ProjectQuota {
+                max_storage_mb: 102400,
+                max_egress_mb: 1048576,
+                max_realtime_connections: 50000,
+                max_functions: 1000,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProjectQuota {
     pub max_storage_mb: u64,
@@ -56,6 +89,7 @@ pub struct Project {
     pub name: String,
     pub region: String,
     pub status: ProjectStatus,
+    pub tier: BillingTier,
     pub anon_key: String,
     pub service_role_key: String,
     pub database_path: String,
@@ -89,10 +123,11 @@ impl ControlPlane {
                 name: "Production Workspace".to_string(),
                 region: "us-east-1".to_string(),
                 status: ProjectStatus::Active,
+                tier: BillingTier::Pro,
                 anon_key: "anon_key_production_default".to_string(),
                 service_role_key: "service_role_key_production_default".to_string(),
                 database_path: "chocobase.db".to_string(),
-                quota: ProjectQuota::default(),
+                quota: BillingTier::Pro.quota(),
                 usage: ResourceUsage {
                     storage_bytes: 1048576,
                     egress_bytes: 2097152,
@@ -148,10 +183,11 @@ impl ControlPlane {
             name: name.to_string(),
             region: region.to_string(),
             status: ProjectStatus::Active,
+            tier: BillingTier::Free,
             anon_key,
             service_role_key,
             database_path,
-            quota: ProjectQuota::default(),
+            quota: BillingTier::Free.quota(),
             usage: ResourceUsage {
                 storage_bytes: 0,
                 egress_bytes: 0,
@@ -165,6 +201,17 @@ impl ControlPlane {
         let mut map = self.projects.lock().unwrap();
         map.insert(id, project.clone());
         Ok(project)
+    }
+
+    pub fn update_project_tier(&self, project_id: &str, tier: BillingTier) -> Result<Project, String> {
+        let mut map = self.projects.lock().unwrap();
+        if let Some(p) = map.get_mut(project_id) {
+            p.quota = tier.quota();
+            p.tier = tier;
+            Ok(p.clone())
+        } else {
+            Err(format!("project '{project_id}' not found"))
+        }
     }
 
     pub fn list_projects(&self) -> Vec<Project> {
