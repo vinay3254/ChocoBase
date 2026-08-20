@@ -392,6 +392,8 @@ async fn handle_http_connection(
             && !path.starts_with("/graphql")
             && !path.starts_with("/auth/")
             && !path.starts_with("/storage/")
+            && !path.starts_with("/functions/")
+            && !path.starts_with("/realtime/")
             && !path.starts_with("/assets/")
             && path != "/health"
             && path != "/healthz"
