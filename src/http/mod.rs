@@ -1085,6 +1085,26 @@ async fn handle_http_connection(
                     }
                 }));
 
+                path_item.insert("patch".to_string(), serde_json::json!({
+                    "summary": format!("Update rows in {table}"),
+                    "requestBody": {
+                        "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{table}") } } }
+                    },
+                    "responses": {
+                        "200": { "description": "OK" }
+                    }
+                }));
+
+                path_item.insert("put".to_string(), serde_json::json!({
+                    "summary": format!("Upsert rows in {table}"),
+                    "requestBody": {
+                        "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{table}") } } }
+                    },
+                    "responses": {
+                        "200": { "description": "OK" }
+                    }
+                }));
+
                 path_item.insert("delete".to_string(), serde_json::json!({
                     "summary": format!("Delete rows from {table}"),
                     "responses": {
