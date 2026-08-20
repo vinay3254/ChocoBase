@@ -489,7 +489,7 @@ async fn handle_http_connection(
         return Ok(());
     }
 
-    if path.starts_with("/v1/storage/") {
+    if path.starts_with("/storage/") || path.starts_with("/v1/storage/") || path.starts_with("/s3/") {
         let (status_code, status_text, json_body, binary_data) = storage::handle_storage_request(
             &db,
             &method,
