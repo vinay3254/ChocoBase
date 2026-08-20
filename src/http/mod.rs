@@ -1921,10 +1921,7 @@ async fn handle_auth_signup(
         }
     };
 
-    let safe_user = match sanitize_identifier(username) {
-        Ok(u) => u,
-        Err(err) => return (400, "Bad Request", serde_json::json!({ "error": err })),
-    };
+    let safe_user = escape_sql_string(username);
 
     if let Some(r) = payload.get("role").and_then(|r| r.as_str()) {
         if r.eq_ignore_ascii_case("admin") || r.eq_ignore_ascii_case("service_role") {
@@ -1938,7 +1935,7 @@ async fn handle_auth_signup(
     let role = "user";
     let safe_pass = escape_sql_string(password);
 
-    let sql = format!("CREATE USER {safe_user} WITH PASSWORD '{safe_pass}' ROLE '{role}'");
+    let sql = format!("CREATE USER '{safe_user}' WITH PASSWORD '{safe_pass}' ROLE '{role}'");
     match db.execute_with_context(&sql, &ExecutionContext::admin()) {
         Ok(_) => {
             // Lookup created user ID
@@ -2033,10 +2030,7 @@ async fn handle_auth_token(
         }
     };
 
-    let safe_user = match sanitize_identifier(username) {
-        Ok(u) => u,
-        Err(err) => return (400, "Bad Request", serde_json::json!({ "error": err })),
-    };
+    let safe_user = escape_sql_string(username);
 
     let sql = format!("SELECT id, password_hash, role FROM _users WHERE username = '{safe_user}'");
     match db.execute_with_context(&sql, &ExecutionContext::admin()) {
