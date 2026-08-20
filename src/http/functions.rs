@@ -15,7 +15,10 @@ pub async fn handle_functions_request(
     body: &str,
     ctx: &ExecutionContext,
 ) -> (u16, &'static str, serde_json::Value) {
-    let subpath = path.strip_prefix("/v1/functions/v1").unwrap_or(path);
+    let subpath = path
+        .strip_prefix("/v1/functions/v1")
+        .or_else(|| path.strip_prefix("/functions/v1"))
+        .unwrap_or(path);
 
     if (subpath.is_empty() || subpath == "/") && method == "GET" {
         let list = registry.list();
