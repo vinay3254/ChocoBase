@@ -316,7 +316,95 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "gen" | "generate" => {
-            let _subcmd = args.get(2).map(|s| s.as_str()).unwrap_or("types");
+            let subcmd = args.get(2).map(|s| s.as_str()).unwrap_or("types");
+            if subcmd == "openapi" || subcmd == "swagger" {
+                let db_file = args.get(3).map(|s| s.as_str()).unwrap_or("chocobase.db");
+                let path = Path::new(db_file);
+                let mut db = match Database::open(path) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        eprintln!("error opening database '{db_file}': {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+
+                let tables = db.list_tables();
+                let mut paths_map = serde_json::Map::new();
+                let mut schemas_map = serde_json::Map::new();
+
+                for table in &tables {
+                    if let Some(schema) = db.table_schema(table) {
+                        let path_key = format!("/rest/v1/{table}");
+                        let mut path_item = serde_json::Map::new();
+
+                        path_item.insert("get".to_string(), serde_json::json!({
+                            "summary": format!("Retrieve rows from {table}"),
+                            "parameters": [
+                                { "name": "select", "in": "query", "description": "Columns to select", "schema": { "type": "string" } },
+                                { "name": "order", "in": "query", "description": "Column order", "schema": { "type": "string" } },
+                                { "name": "limit", "in": "query", "description": "Row limit", "schema": { "type": "integer" } }
+                            ],
+                            "responses": {
+                                "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": format!("#/components/schemas/{table}") } } } } }
+                            }
+                        }));
+
+                        path_item.insert("post".to_string(), serde_json::json!({
+                            "summary": format!("Insert rows into {table}"),
+                            "requestBody": {
+                                "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{table}") } } }
+                            },
+                            "responses": {
+                                "201": { "description": "Created" }
+                            }
+                        }));
+
+                        path_item.insert("delete".to_string(), serde_json::json!({
+                            "summary": format!("Delete rows from {table}"),
+                            "responses": {
+                                "200": { "description": "OK" }
+                            }
+                        }));
+
+                        paths_map.insert(path_key, serde_json::Value::Object(path_item));
+
+                        let mut props = serde_json::Map::new();
+                        for col in &schema.columns {
+                            let col_type = match col.ty {
+                                dbengine::types::value::ColumnType::Integer => "integer",
+                                dbengine::types::value::ColumnType::Float => "number",
+                                dbengine::types::value::ColumnType::Text => "string",
+                                dbengine::types::value::ColumnType::Boolean => "boolean",
+                                dbengine::types::value::ColumnType::Json => "object",
+                                dbengine::types::value::ColumnType::Vector(_) => "array",
+                            };
+                            props.insert(col.name.clone(), serde_json::json!({ "type": col_type }));
+                        }
+
+                        schemas_map.insert(table.clone(), serde_json::json!({
+                            "type": "object",
+                            "properties": props
+                        }));
+                    }
+                }
+
+                let doc = serde_json::json!({
+                    "openapi": "3.0.0",
+                    "info": {
+                        "title": "ChocoBase Auto-Generated API",
+                        "version": "1.0.0",
+                        "description": "Dynamic PostgREST and relational REST API specification for active ChocoBase schema"
+                    },
+                    "paths": paths_map,
+                    "components": {
+                        "schemas": schemas_map
+                    }
+                });
+
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+                return ExitCode::SUCCESS;
+            }
+
             let lang = args.get(3).map(|s| s.as_str()).unwrap_or("typescript");
             let db_file = args.get(4).map(|s| s.as_str()).unwrap_or("chocobase.db");
 
