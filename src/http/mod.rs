@@ -2422,7 +2422,21 @@ fn build_where_clauses(params: &HashMap<String, String>) -> Vec<String> {
     clauses
 }
 
+fn format_filter_key(key: &str) -> String {
+    if let Some((col, path)) = key.split_once("->>") {
+        let clean_path = path.trim_matches('\'').trim_matches('"');
+        format!("{col}->>'{clean_path}'")
+    } else if let Some((col, path)) = key.split_once("->") {
+        let clean_path = path.trim_matches('\'').trim_matches('"');
+        format!("{col}->'{clean_path}'")
+    } else {
+        key.to_string()
+    }
+}
+
 fn parse_single_filter(key: &str, val: &str) -> Option<String> {
+    let formatted_key = format_filter_key(key);
+    let key = formatted_key.as_str();
     let (is_not, rest_val) = if let Some(stripped) = val.strip_prefix("not.") {
         (true, stripped)
     } else {
