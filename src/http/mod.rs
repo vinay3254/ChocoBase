@@ -175,6 +175,7 @@ async fn handle_http_connection(
     let mut origin_header = None;
     let mut range_header = None;
     let mut prefer_header = None;
+    let mut accept_header = None;
     let mut ws_upgrade = false;
     let mut ws_key = None;
     let mut content_length = 0usize;
@@ -199,6 +200,8 @@ async fn handle_http_connection(
                 range_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("prefer") {
                 prefer_header = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("accept") {
+                accept_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("upgrade")
                 && v_trim.eq_ignore_ascii_case("websocket")
             {
@@ -1332,6 +1335,7 @@ async fn handle_http_connection(
             &body,
             &exec_ctx,
             prefer_header.as_deref(),
+            accept_header.as_deref(),
         )
         .await;
         if let Some(cr) = cr_opt {
@@ -1358,6 +1362,11 @@ async fn handle_http_connection(
                 serde_json::Value::String(s) => s.as_bytes().to_vec(),
                 _ => vec![],
             },
+        )
+    } else if accept_header.as_deref().map(|a| a.contains("vnd.pgrst.object+json")).unwrap_or(false) && status_code == 200 {
+        (
+            "application/vnd.pgrst.object+json; charset=utf-8",
+            serde_json::to_vec(&json_body).unwrap_or_default(),
         )
     } else {
         (
@@ -2268,6 +2277,7 @@ async fn handle_rest_table_crud(
     body: &str,
     ctx: &ExecutionContext,
     prefer_header: Option<&str>,
+    accept_header: Option<&str>,
 ) -> (u16, &'static str, serde_json::Value, Option<String>, Option<String>) {
     let schema = match db.table_schema(table) {
         Some(s) => s,
@@ -2285,6 +2295,9 @@ async fn handle_rest_table_crud(
     let query_params = parse_query_params(query_str);
     let pref_str = prefer_header.map(|p| p.to_lowercase()).unwrap_or_default();
     let is_minimal = pref_str.contains("return=minimal");
+    let is_single_object = accept_header
+        .map(|a| a.contains("vnd.pgrst.object+json"))
+        .unwrap_or(false);
 
     match method {
         "GET" => {
@@ -2404,7 +2417,28 @@ async fn handle_rest_table_crud(
                         None
                     };
 
-                    (200, "OK", serde_json::Value::Array(json_rows), cr_opt, pref_opt)
+                    if is_single_object {
+                        if json_rows.len() == 1 {
+                            let single_val = json_rows.into_iter().next().unwrap();
+                            (200, "OK", single_val, cr_opt, pref_opt)
+                        } else {
+                            let count_str = format!("The result contains {} rows", json_rows.len());
+                            (
+                                406,
+                                "Not Acceptable",
+                                serde_json::json!({
+                                    "code": "PGRST116",
+                                    "details": count_str,
+                                    "hint": null,
+                                    "message": "JSON object requested, multiple (or no) rows returned"
+                                }),
+                                None,
+                                None,
+                            )
+                        }
+                    } else {
+                        (200, "OK", serde_json::Value::Array(json_rows), cr_opt, pref_opt)
+                    }
                 }
                 Ok(_) => (200, "OK", serde_json::json!([]), None, None),
                 Err(e) => (
@@ -2558,6 +2592,8 @@ async fn handle_rest_table_crud(
 
             if is_minimal {
                 (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+            } else if is_single_object && returned_rows.len() == 1 {
+                (201, "Created", returned_rows.into_iter().next().unwrap(), None, Some("return=representation".to_string()))
             } else if !returned_rows.is_empty() {
                 (201, "Created", serde_json::Value::Array(returned_rows), None, Some("return=representation".to_string()))
             } else {
@@ -2633,6 +2669,8 @@ async fn handle_rest_table_crud(
                         .collect();
                     if is_minimal {
                         (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                    } else if is_single_object && json_rows.len() == 1 {
+                        (200, "OK", json_rows.into_iter().next().unwrap(), None, Some("return=representation".to_string()))
                     } else {
                         (200, "OK", serde_json::Value::Array(json_rows), None, Some("return=representation".to_string()))
                     }
@@ -2682,6 +2720,8 @@ async fn handle_rest_table_crud(
                         .collect();
                     if is_minimal {
                         (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                    } else if is_single_object && json_rows.len() == 1 {
+                        (200, "OK", json_rows.into_iter().next().unwrap(), None, Some("return=representation".to_string()))
                     } else {
                         (200, "OK", serde_json::Value::Array(json_rows), None, Some("return=representation".to_string()))
                     }
