@@ -1084,7 +1084,7 @@ async fn handle_http_connection(
             "OK",
             serde_json::to_value(&gql_resp).unwrap_or_else(|_| serde_json::json!({})),
         )
-    } else if method == "GET" && (path == "/health" || path == "/healthz" || path == "/readyz" || path == "/livez") {
+    } else if (method == "GET" || method == "HEAD") && (path == "/health" || path == "/healthz" || path == "/readyz" || path == "/livez") {
         (
             200,
             "OK",
@@ -1095,7 +1095,7 @@ async fn handle_http_connection(
                 "engine": "ChocoBase"
             }),
         )
-    } else if method == "GET" && (path == "/auth/v1/health" || path == "/v1/auth/health") {
+    } else if (method == "GET" || method == "HEAD") && (path == "/auth/v1/health" || path == "/v1/auth/health") {
         (
             200,
             "OK",
@@ -1106,7 +1106,7 @@ async fn handle_http_connection(
                 "status": "healthy"
             }),
         )
-    } else if method == "GET" && (path == "/storage/v1/version" || path == "/v1/storage/version") {
+    } else if (method == "GET" || method == "HEAD") && (path == "/storage/v1/version" || path == "/v1/storage/version") {
         (
             200,
             "OK",
@@ -1115,7 +1115,7 @@ async fn handle_http_connection(
                 "installed": true
             }),
         )
-    } else if method == "GET" && (path == "/realtime/v1/health" || path == "/v1/realtime/health") {
+    } else if (method == "GET" || method == "HEAD") && (path == "/realtime/v1/health" || path == "/v1/realtime/health") {
         (
             200,
             "OK",
@@ -1124,10 +1124,10 @@ async fn handle_http_connection(
                 "version": "v2.28.0"
             }),
         )
-    } else if method == "GET" && path == "/metrics" {
+    } else if (method == "GET" || method == "HEAD") && path == "/metrics" {
         let metrics_text = crate::metrics::MetricsRegistry::global().render_prometheus();
         (200, "OK", serde_json::Value::String(metrics_text))
-    } else if method == "GET" && (path == "/.well-known/jwks.json" || path == "/v1/auth/keys") {
+    } else if (method == "GET" || method == "HEAD") && (path == "/.well-known/jwks.json" || path == "/v1/auth/keys") {
         (
             200,
             "OK",
@@ -1142,7 +1142,7 @@ async fn handle_http_connection(
                 ]
             }),
         )
-    } else if method == "GET" && (path == "/v1/openapi.json" || path == "/rest/v1" || path == "/rest/v1/") {
+    } else if (method == "GET" || method == "HEAD") && (path == "/v1/openapi.json" || path == "/rest/v1" || path == "/rest/v1/") {
         let tables = db.list_tables();
         let mut paths_map = serde_json::Map::new();
         let mut schemas_map = serde_json::Map::new();
@@ -1510,7 +1510,9 @@ async fn handle_http_connection(
     );
 
     socket.write_all(header.as_bytes()).await?;
-    socket.write_all(&body_bytes).await?;
+    if method != "HEAD" {
+        socket.write_all(&body_bytes).await?;
+    }
     socket.flush().await?;
 
     Ok(())
@@ -2466,7 +2468,7 @@ async fn handle_rest_table_crud(
     };
 
     match method {
-        "GET" => {
+        "GET" | "HEAD" => {
             let select_param = query_params
                 .get("select")
                 .map(|s| s.as_str())
