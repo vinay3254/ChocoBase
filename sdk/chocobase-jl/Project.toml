@@ -1,0 +1,11 @@
+name = "ChocoBase"
+uuid = "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+authors = ["ChocoBase Team"]
+version = "0.1.0"
+
+[deps]
+HTTP = "cd3bd86a-cd63-539a-929e-1749e9b0507e"
+JSON3 = "0f5b78e9-464d-4903-ac22-f50f0f8a9cf5"
+
+[compat]
+julia = "1.6"
