@@ -396,6 +396,7 @@ async fn handle_http_connection(
             && path != "/health"
             && path != "/healthz"
             && path != "/readyz"
+            && path != "/livez"
             && path != "/metrics"
             && path != "/.well-known/jwks.json"
         {
@@ -1012,7 +1013,7 @@ async fn handle_http_connection(
             "OK",
             serde_json::to_value(&gql_resp).unwrap_or_else(|_| serde_json::json!({})),
         )
-    } else if method == "GET" && (path == "/health" || path == "/healthz" || path == "/readyz") {
+    } else if method == "GET" && (path == "/health" || path == "/healthz" || path == "/readyz" || path == "/livez") {
         (
             200,
             "OK",
