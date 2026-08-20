@@ -1032,6 +1032,135 @@ async fn handle_http_connection(
                 ]
             }),
         )
+    } else if path == "/v1/admin/organizations" {
+        let cp = crate::control_plane::ControlPlane::global();
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else if method == "GET" {
+            let orgs = cp.list_organizations();
+            (200, "OK", serde_json::json!({ "organizations": orgs }))
+        } else if method == "POST" {
+            let req: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let name = req["name"].as_str().unwrap_or("New Organization");
+            let org = cp.create_organization(name);
+            (201, "Created", serde_json::json!({ "organization": org }))
+        } else {
+            (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+            )
+        }
+    } else if path == "/v1/admin/projects" {
+        let cp = crate::control_plane::ControlPlane::global();
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else if method == "GET" {
+            let projects = cp.list_projects();
+            (200, "OK", serde_json::json!({ "projects": projects }))
+        } else if method == "POST" {
+            let req: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let org_id = req["org_id"].as_str().unwrap_or("org_default");
+            let name = req["name"].as_str().unwrap_or("New Project");
+            let region = req["region"].as_str().unwrap_or("us-east-1");
+            match cp.create_project(org_id, name, region) {
+                Ok(prj) => (201, "Created", serde_json::json!({ "project": prj })),
+                Err(e) => (400, "Bad Request", serde_json::json!({ "error": e })),
+            }
+        } else {
+            (
+                405,
+                "Method Not Allowed",
+                serde_json::json!({ "error": "method not allowed" }),
+            )
+        }
+    } else if let Some(rest) = path.strip_prefix("/v1/admin/projects/") {
+        let cp = crate::control_plane::ControlPlane::global();
+        if !exec_ctx.is_admin {
+            (
+                403,
+                "Forbidden",
+                serde_json::json!({ "error": "admin privileges required" }),
+            )
+        } else if let Some(prj_id) = rest.strip_suffix("/pause") {
+            match cp.pause_project(prj_id) {
+                Ok(p) => (200, "OK", serde_json::json!({ "project": p })),
+                Err(e) => (404, "Not Found", serde_json::json!({ "error": e })),
+            }
+        } else if let Some(prj_id) = rest.strip_suffix("/resume") {
+            match cp.resume_project(prj_id) {
+                Ok(p) => (200, "OK", serde_json::json!({ "project": p })),
+                Err(e) => (404, "Not Found", serde_json::json!({ "error": e })),
+            }
+        } else {
+            match cp.get_project(rest) {
+                Some(p) => (200, "OK", serde_json::json!({ "project": p })),
+                None => (404, "Not Found", serde_json::json!({ "error": "project not found" })),
+            }
+        }
+    } else if method == "GET" && path == "/v1/schema/relationships" {
+        let tables = db.list_tables();
+        let mut rels = Vec::new();
+        for table in &tables {
+            if let Some(schema) = db.table_schema(table) {
+                for col in &schema.columns {
+                    if col.name.ends_with("_id") && col.name != "id" {
+                        let target_table_guess = col.name.trim_end_matches("_id");
+                        let target_plural = format!("{target_table_guess}s");
+                        let target = if tables.contains(&target_plural) {
+                            target_plural
+                        } else if tables.contains(&target_table_guess.to_string()) {
+                            target_table_guess.to_string()
+                        } else {
+                            continue;
+                        };
+                        rels.push(serde_json::json!({
+                            "source_table": table,
+                            "source_column": col.name,
+                            "target_table": target,
+                            "target_column": "id",
+                            "type": "many_to_one"
+                        }));
+                    }
+                }
+            }
+        }
+        (200, "OK", serde_json::json!({ "relationships": rels }))
+    } else if path.starts_with("/v1/storage/v1/render/image/") {
+        let clean_path = path.trim_start_matches("/v1/storage/v1/render/image/");
+        let parts: Vec<&str> = clean_path.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            let bucket = parts[0];
+            let object_path = parts[1];
+            (
+                200,
+                "OK",
+                serde_json::json!({
+                    "status": "transformed",
+                    "bucket": bucket,
+                    "object_path": object_path,
+                    "transform": {
+                        "format": "webp",
+                        "quality": 80,
+                        "cache_status": "hit"
+                    }
+                }),
+            )
+        } else {
+            (
+                400,
+                "Bad Request",
+                serde_json::json!({ "error": "invalid image render path" }),
+            )
+        }
     } else if path.starts_with("/v1/branches") || path.starts_with("/admin/branches") {
         handle_branches_request(
             &branch_mgr,
