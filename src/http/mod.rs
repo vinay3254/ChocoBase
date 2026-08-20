@@ -3023,8 +3023,12 @@ fn parse_single_filter(key: &str, val: &str) -> Option<String> {
                     format!("{key} LIKE '{pattern}'")
                 }
             }
-            "fts" | "wfts" | "match" => {
-                let term = rhs.replace('\'', "''");
+            "fts" | "wfts" | "plfts" | "phfts" | "match" => {
+                let term = if let Some((_cfg, actual_term)) = rhs.split_once(')') {
+                    actual_term.trim_start_matches('.').replace('\'', "''")
+                } else {
+                    rhs.replace('\'', "''")
+                };
                 if is_not {
                     format!("NOT FTS_MATCH({key}, '{term}')")
                 } else {
