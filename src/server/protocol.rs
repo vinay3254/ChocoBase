@@ -39,6 +39,13 @@ pub enum Request {
     Subscribe { table: Option<String> },
     /// Unsubscribe from live mutation events.
     Unsubscribe,
+    /// High-throughput bulk data import (Postgres COPY IN protocol equivalent).
+    CopyIn {
+        table: String,
+        rows: Vec<Vec<crate::types::value::Value>>,
+    },
+    /// High-throughput bulk data export (Postgres COPY OUT protocol equivalent).
+    CopyOut { table: String },
 }
 
 /// Server response returned to client.
@@ -62,6 +69,12 @@ pub enum Response {
     Subscribed,
     /// Unsubscription acknowledged.
     Unsubscribed,
+    /// High-throughput bulk exported rows.
+    CopyData {
+        rows: Vec<Vec<crate::types::value::Value>>,
+    },
+    /// High-throughput bulk import completion status.
+    CopyDone { rows_copied: usize },
 }
 
 /// Serializes and writes a framed response to an async writer.
