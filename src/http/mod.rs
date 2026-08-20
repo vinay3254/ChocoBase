@@ -2422,6 +2422,49 @@ async fn handle_rest_table_crud(
         .map(|a| a.contains("vnd.pgrst.object+json"))
         .unwrap_or(false);
 
+    let build_pref_applied = |default_return: Option<&str>| -> Option<String> {
+        let mut prefs = Vec::new();
+        if is_minimal {
+            prefs.push("return=minimal".to_string());
+        } else if pref_str.contains("return=representation") {
+            prefs.push("return=representation".to_string());
+        } else if let Some(def_ret) = default_return {
+            prefs.push(def_ret.to_string());
+        }
+
+        if pref_str.contains("count=exact") {
+            prefs.push("count=exact".to_string());
+        } else if pref_str.contains("count=planned") {
+            prefs.push("count=planned".to_string());
+        } else if pref_str.contains("count=estimated") {
+            prefs.push("count=estimated".to_string());
+        }
+
+        if pref_str.contains("resolution=ignore-duplicates") {
+            prefs.push("resolution=ignore-duplicates".to_string());
+        } else if pref_str.contains("resolution=merge-duplicates") {
+            prefs.push("resolution=merge-duplicates".to_string());
+        }
+
+        if pref_str.contains("missing=default") {
+            prefs.push("missing=default".to_string());
+        } else if pref_str.contains("missing=null") {
+            prefs.push("missing=null".to_string());
+        }
+
+        if pref_str.contains("tx=rollback") {
+            prefs.push("tx=rollback".to_string());
+        } else if pref_str.contains("tx=commit") {
+            prefs.push("tx=commit".to_string());
+        }
+
+        if prefs.is_empty() {
+            None
+        } else {
+            Some(prefs.join(", "))
+        }
+    };
+
     match method {
         "GET" => {
             let select_param = query_params
@@ -2525,11 +2568,7 @@ async fn handle_rest_table_crud(
                         None
                     };
 
-                    let pref_opt = if is_count {
-                        Some("count=exact".to_string())
-                    } else {
-                        None
-                    };
+                    let pref_opt = build_pref_applied(None);
 
                     if is_single_object {
                         if json_rows.len() == 1 {
@@ -2554,7 +2593,7 @@ async fn handle_rest_table_crud(
                         (200, "OK", serde_json::Value::Array(json_rows), cr_opt, pref_opt)
                     }
                 }
-                Ok(_) => (200, "OK", serde_json::json!([]), None, None),
+                Ok(_) => (200, "OK", serde_json::json!([]), None, build_pref_applied(None)),
                 Err(e) => (
                     400,
                     "Bad Request",
@@ -2722,18 +2761,18 @@ async fn handle_rest_table_crud(
             }
 
             if is_minimal {
-                (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                (204, "No Content", serde_json::Value::Null, None, build_pref_applied(Some("return=minimal")))
             } else if is_single_object && returned_rows.len() == 1 {
-                (201, "Created", returned_rows.into_iter().next().unwrap(), None, Some("return=representation".to_string()))
+                (201, "Created", returned_rows.into_iter().next().unwrap(), None, build_pref_applied(Some("return=representation")))
             } else if !returned_rows.is_empty() {
-                (201, "Created", serde_json::Value::Array(returned_rows), None, Some("return=representation".to_string()))
+                (201, "Created", serde_json::Value::Array(returned_rows), None, build_pref_applied(Some("return=representation")))
             } else {
                 (
                     201,
                     "Created",
                     serde_json::json!({ "status": "ok", "inserted": inserted_count }),
                     None,
-                    None,
+                    build_pref_applied(None),
                 )
             }
         }
@@ -2799,25 +2838,25 @@ async fn handle_rest_table_crud(
                         })
                         .collect();
                     if is_minimal {
-                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                        (204, "No Content", serde_json::Value::Null, None, build_pref_applied(Some("return=minimal")))
                     } else if is_single_object && json_rows.len() == 1 {
-                        (200, "OK", json_rows.into_iter().next().unwrap(), None, Some("return=representation".to_string()))
+                        (200, "OK", json_rows.into_iter().next().unwrap(), None, build_pref_applied(Some("return=representation")))
                     } else {
-                        (200, "OK", serde_json::Value::Array(json_rows), None, Some("return=representation".to_string()))
+                        (200, "OK", serde_json::Value::Array(json_rows), None, build_pref_applied(Some("return=representation")))
                     }
                 }
                 Ok(ExecResult::Modified(n)) => {
                     if is_minimal {
-                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                        (204, "No Content", serde_json::Value::Null, None, build_pref_applied(Some("return=minimal")))
                     } else {
-                        (200, "OK", serde_json::json!({ "status": "ok", "modified": n }), None, None)
+                        (200, "OK", serde_json::json!({ "status": "ok", "modified": n }), None, build_pref_applied(None))
                     }
                 }
                 Ok(_) => {
                     if is_minimal {
-                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                        (204, "No Content", serde_json::Value::Null, None, build_pref_applied(Some("return=minimal")))
                     } else {
-                        (200, "OK", serde_json::json!({ "status": "ok", "modified": 0 }), None, None)
+                        (200, "OK", serde_json::json!({ "status": "ok", "modified": 0 }), None, build_pref_applied(None))
                     }
                 }
                 Err(e) => (
@@ -2850,25 +2889,25 @@ async fn handle_rest_table_crud(
                         })
                         .collect();
                     if is_minimal {
-                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                        (204, "No Content", serde_json::Value::Null, None, build_pref_applied(Some("return=minimal")))
                     } else if is_single_object && json_rows.len() == 1 {
-                        (200, "OK", json_rows.into_iter().next().unwrap(), None, Some("return=representation".to_string()))
+                        (200, "OK", json_rows.into_iter().next().unwrap(), None, build_pref_applied(Some("return=representation")))
                     } else {
-                        (200, "OK", serde_json::Value::Array(json_rows), None, Some("return=representation".to_string()))
+                        (200, "OK", serde_json::Value::Array(json_rows), None, build_pref_applied(Some("return=representation")))
                     }
                 }
                 Ok(ExecResult::Modified(n)) => {
                     if is_minimal {
-                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                        (204, "No Content", serde_json::Value::Null, None, build_pref_applied(Some("return=minimal")))
                     } else {
-                        (200, "OK", serde_json::json!({ "status": "ok", "deleted": n }), None, None)
+                        (200, "OK", serde_json::json!({ "status": "ok", "deleted": n }), None, build_pref_applied(None))
                     }
                 }
                 Ok(_) => {
                     if is_minimal {
-                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                        (204, "No Content", serde_json::Value::Null, None, build_pref_applied(Some("return=minimal")))
                     } else {
-                        (200, "OK", serde_json::json!({ "status": "ok", "deleted": 0 }), None, None)
+                        (200, "OK", serde_json::json!({ "status": "ok", "deleted": 0 }), None, build_pref_applied(None))
                     }
                 }
                 Err(e) => (
