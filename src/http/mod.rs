@@ -1871,7 +1871,7 @@ async fn handle_rpc(
         "current_user" => (
             200,
             "OK",
-            serde_json::json!({ "user_id": ctx.user_id, "role": ctx.role }),
+            serde_json::json!({ "user_id": ctx.user_id, "role": ctx.role.clone().unwrap_or_else(|| "anon".to_string()) }),
         ),
         "echo" => (200, "OK", payload),
         _ => {
