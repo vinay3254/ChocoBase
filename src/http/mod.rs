@@ -1109,12 +1109,45 @@ async fn handle_http_connection(
                 Ok(p) => (200, "OK", serde_json::json!({ "project": p })),
                 Err(e) => (404, "Not Found", serde_json::json!({ "error": e })),
             }
+        } else if let Some(prj_id) = rest.strip_suffix("/tier") {
+            if method == "POST" {
+                let req: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                let tier_str = req["tier"].as_str().unwrap_or("pro");
+                let tier = match tier_str.to_lowercase().as_str() {
+                    "enterprise" => crate::control_plane::BillingTier::Enterprise,
+                    "pro" => crate::control_plane::BillingTier::Pro,
+                    _ => crate::control_plane::BillingTier::Free,
+                };
+                match cp.update_project_tier(prj_id, tier) {
+                    Ok(p) => (200, "OK", serde_json::json!({ "project": p })),
+                    Err(e) => (404, "Not Found", serde_json::json!({ "error": e })),
+                }
+            } else {
+                (405, "Method Not Allowed", serde_json::json!({ "error": "method not allowed" }))
+            }
         } else {
             match cp.get_project(rest) {
                 Some(p) => (200, "OK", serde_json::json!({ "project": p })),
                 None => (404, "Not Found", serde_json::json!({ "error": "project not found" })),
             }
         }
+    } else if method == "POST" && path == "/v1/admin/billing/webhook" {
+        let req: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        let event_type = req["type"].as_str().unwrap_or("");
+        let cp = crate::control_plane::ControlPlane::global();
+        if event_type == "customer.subscription.updated" || event_type == "customer.subscription.created" {
+            let prj_id = req["data"]["object"]["metadata"]["project_id"].as_str().unwrap_or("prj_default");
+            let plan = req["data"]["object"]["items"]["data"][0]["plan"]["id"].as_str().unwrap_or("pro");
+            let tier = if plan.contains("enterprise") {
+                crate::control_plane::BillingTier::Enterprise
+            } else if plan.contains("pro") {
+                crate::control_plane::BillingTier::Pro
+            } else {
+                crate::control_plane::BillingTier::Free
+            };
+            let _ = cp.update_project_tier(prj_id, tier);
+        }
+        (200, "OK", serde_json::json!({ "received": true }))
     } else if method == "GET" && path == "/v1/schema/relationships" {
         let tables = db.list_tables();
         let mut rels = Vec::new();
