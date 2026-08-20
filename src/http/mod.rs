@@ -989,7 +989,7 @@ async fn handle_http_connection(
     } else if path.starts_with("/functions/v1") || path.starts_with("/v1/functions/v1") {
         functions::handle_functions_request(&functions_reg, &db, &method, path, &body, &exec_ctx)
             .await
-    } else if path.starts_with("/v1/realtime/v1") {
+    } else if path.starts_with("/realtime/v1") || path.starts_with("/v1/realtime/v1") {
         realtime_channels::handle_realtime_channel_request(
             &realtime_mgr,
             &method,
