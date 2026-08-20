@@ -252,7 +252,21 @@ pub async fn handle_storage_request(
     let subpath = path
         .strip_prefix("/v1/storage/v1")
         .or_else(|| path.strip_prefix("/storage/v1"))
+        .or_else(|| path.strip_prefix("/v1/storage"))
+        .or_else(|| path.strip_prefix("/storage"))
         .unwrap_or(path);
+
+    if subpath == "/version" || subpath == "/v1/version" {
+        return (
+            200,
+            "OK",
+            serde_json::json!({
+                "version": "1.0.0",
+                "installed": true
+            }),
+            None,
+        );
+    }
 
     if let Some(render_sub) = subpath.strip_prefix("/render/image/") {
         let clean = render_sub.trim_start_matches('/');
