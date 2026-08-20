@@ -68,6 +68,16 @@ impl Parser {
         }
     }
 
+    fn parse_table_name(&mut self) -> Result<String, ParseError> {
+        let mut name = self.expect_identifier()?;
+        if matches!(self.peek(), Token::Dot) {
+            self.advance();
+            let sub = self.expect_identifier()?;
+            name = format!("{name}.{sub}");
+        }
+        Ok(name)
+    }
+
     pub fn parse_statement(&mut self) -> Result<Statement, ParseError> {
         let stmt = match self.peek() {
             Token::Explain => {
@@ -345,7 +355,7 @@ impl Parser {
 
     fn parse_create_table(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Table)?;
-        let name = self.expect_identifier()?;
+        let name = self.parse_table_name()?;
         self.expect(&Token::LParen)?;
         let mut columns = Vec::new();
         loop {
@@ -416,7 +426,7 @@ impl Parser {
         let offset = self.peek_offset();
         match self.advance() {
             Token::Table => Ok(Statement::DropTable {
-                name: self.expect_identifier()?,
+                name: self.parse_table_name()?,
             }),
             Token::Index => Ok(Statement::DropIndex {
                 name: self.expect_identifier()?,
@@ -655,7 +665,7 @@ impl Parser {
     fn parse_insert(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Insert)?;
         self.expect(&Token::Into)?;
-        let table = self.expect_identifier()?;
+        let table = self.parse_table_name()?;
 
         let columns = if matches!(self.peek(), Token::LParen) {
             self.advance();
@@ -965,7 +975,7 @@ impl Parser {
             SelectColumns::Items(items)
         };
         self.expect(&Token::From)?;
-        let table = self.expect_identifier()?;
+        let table = self.parse_table_name()?;
 
         let mut table_ref = crate::sql::ast::TableRef::Table {
             name: table.clone(),
@@ -1001,7 +1011,7 @@ impl Parser {
                 Token::Join => crate::sql::ast::JoinType::Inner,
                 _ => unreachable!(),
             };
-            let right_table = self.expect_identifier()?;
+            let right_table = self.parse_table_name()?;
             let right_alias = if matches!(self.peek(), Token::As) {
                 self.advance();
                 Some(self.expect_identifier()?)
@@ -1136,7 +1146,7 @@ impl Parser {
 
     fn parse_update(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Update)?;
-        let table = self.expect_identifier()?;
+        let table = self.parse_table_name()?;
         self.expect(&Token::Set)?;
         let mut assignments = Vec::new();
         loop {
@@ -1169,7 +1179,7 @@ impl Parser {
     fn parse_delete(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Delete)?;
         self.expect(&Token::From)?;
-        let table = self.expect_identifier()?;
+        let table = self.parse_table_name()?;
         let where_clause = if matches!(self.peek(), Token::Where) {
             self.advance();
             Some(self.parse_where_expr()?)
