@@ -132,7 +132,16 @@ impl Parser {
 
     fn parse_create_user(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::User)?;
-        let username = self.expect_identifier()?;
+        let username = match self.peek() {
+            Token::StringLiteral(_) => {
+                if let Token::StringLiteral(s) = self.advance() {
+                    s
+                } else {
+                    unreachable!()
+                }
+            }
+            _ => self.expect_identifier()?,
+        };
         if matches!(self.peek(), Token::With) {
             self.advance();
         }
