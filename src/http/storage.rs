@@ -362,7 +362,7 @@ pub async fn handle_storage_request(
                 "Created",
                 serde_json::json!({
                     "session_id": sess_id,
-                    "location": format!("/v1/storage/v1/upload/resumable/{sess_id}"),
+                    "location": format!("/storage/v1/upload/resumable/{sess_id}"),
                     "status": "created"
                 }),
                 None,
