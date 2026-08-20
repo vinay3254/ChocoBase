@@ -2396,44 +2396,135 @@ fn parse_query_params(query: &str) -> HashMap<String, String> {
 fn build_where_clauses(params: &HashMap<String, String>) -> Vec<String> {
     let mut clauses = Vec::new();
     for (key, val) in params {
-        if key == "order" || key == "limit" || key == "offset" || key == "select" {
+        if key == "order" || key == "limit" || key == "offset" || key == "select" || key == "apikey" {
             continue;
         }
-        if let Some((op, rhs)) = val.split_once('.') {
-            match op {
-                "eq" => clauses.push(format!("{key} = {}", format_sql_val(rhs))),
-                "neq" => clauses.push(format!("{key} != {}", format_sql_val(rhs))),
-                "gt" => clauses.push(format!("{key} > {}", format_sql_val(rhs))),
-                "gte" => clauses.push(format!("{key} >= {}", format_sql_val(rhs))),
-                "lt" => clauses.push(format!("{key} < {}", format_sql_val(rhs))),
-                "lte" => clauses.push(format!("{key} <= {}", format_sql_val(rhs))),
-                "like" | "ilike" => {
-                    clauses.push(format!("{key} LIKE '{}'", rhs.replace('\'', "''")))
-                }
-                "is" => {
-                    if rhs.eq_ignore_ascii_case("null") {
-                        clauses.push(format!("{key} IS NULL"));
-                    } else if rhs.eq_ignore_ascii_case("not_null")
-                        || rhs.eq_ignore_ascii_case("not.null")
-                    {
-                        clauses.push(format!("{key} IS NOT NULL"));
+        if key == "or" {
+            let inner = val.trim_start_matches('(').trim_end_matches(')');
+            let mut or_parts = Vec::new();
+            for part in inner.split(',') {
+                if let Some((sub_k, sub_v)) = part.split_once('.') {
+                    if let Some(c) = parse_single_filter(sub_k, sub_v) {
+                        or_parts.push(c);
                     }
                 }
-                "in" => {
-                    let cleaned = rhs.trim_start_matches('(').trim_end_matches(')');
-                    let elements: Vec<String> = cleaned
-                        .split(',')
-                        .map(|item| format_sql_val(item.trim()))
-                        .collect();
-                    clauses.push(format!("{key} IN ({})", elements.join(", ")));
-                }
-                _ => clauses.push(format!("{key} = {}", format_sql_val(rhs))),
             }
-        } else {
-            clauses.push(format!("{key} = {}", format_sql_val(val)));
+            if !or_parts.is_empty() {
+                clauses.push(format!("({})", or_parts.join(" OR ")));
+            }
+            continue;
+        }
+
+        if let Some(clause) = parse_single_filter(key, val) {
+            clauses.push(clause);
         }
     }
     clauses
+}
+
+fn parse_single_filter(key: &str, val: &str) -> Option<String> {
+    let (is_not, rest_val) = if let Some(stripped) = val.strip_prefix("not.") {
+        (true, stripped)
+    } else {
+        (false, val)
+    };
+
+    let clause = if let Some((op, rhs)) = rest_val.split_once('.') {
+        match op {
+            "eq" => {
+                if is_not {
+                    format!("{key} != {}", format_sql_val(rhs))
+                } else {
+                    format!("{key} = {}", format_sql_val(rhs))
+                }
+            }
+            "neq" => {
+                if is_not {
+                    format!("{key} = {}", format_sql_val(rhs))
+                } else {
+                    format!("{key} != {}", format_sql_val(rhs))
+                }
+            }
+            "gt" => {
+                if is_not {
+                    format!("{key} <= {}", format_sql_val(rhs))
+                } else {
+                    format!("{key} > {}", format_sql_val(rhs))
+                }
+            }
+            "gte" => {
+                if is_not {
+                    format!("{key} < {}", format_sql_val(rhs))
+                } else {
+                    format!("{key} >= {}", format_sql_val(rhs))
+                }
+            }
+            "lt" => {
+                if is_not {
+                    format!("{key} >= {}", format_sql_val(rhs))
+                } else {
+                    format!("{key} < {}", format_sql_val(rhs))
+                }
+            }
+            "lte" => {
+                if is_not {
+                    format!("{key} > {}", format_sql_val(rhs))
+                } else {
+                    format!("{key} <= {}", format_sql_val(rhs))
+                }
+            }
+            "like" | "ilike" => {
+                let pattern = rhs.replace('\'', "''");
+                if is_not {
+                    format!("{key} NOT LIKE '{pattern}'")
+                } else {
+                    format!("{key} LIKE '{pattern}'")
+                }
+            }
+            "fts" | "wfts" | "match" => {
+                let term = rhs.replace('\'', "''");
+                if is_not {
+                    format!("NOT FTS_MATCH({key}, '{term}')")
+                } else {
+                    format!("FTS_MATCH({key}, '{term}')")
+                }
+            }
+            "is" => {
+                if rhs.eq_ignore_ascii_case("null") {
+                    if is_not {
+                        format!("{key} IS NOT NULL")
+                    } else {
+                        format!("{key} IS NULL")
+                    }
+                } else if rhs.eq_ignore_ascii_case("not_null") || rhs.eq_ignore_ascii_case("not.null") {
+                    if is_not {
+                        format!("{key} IS NULL")
+                    } else {
+                        format!("{key} IS NOT NULL")
+                    }
+                } else {
+                    format!("{key} IS NULL")
+                }
+            }
+            "in" => {
+                let cleaned = rhs.trim_start_matches('(').trim_end_matches(')');
+                let elements: Vec<String> = cleaned
+                    .split(',')
+                    .map(|item| format_sql_val(item.trim()))
+                    .collect();
+                if is_not {
+                    format!("{key} NOT IN ({})", elements.join(", "))
+                } else {
+                    format!("{key} IN ({})", elements.join(", "))
+                }
+            }
+            _ => format!("{key} = {}", format_sql_val(rest_val)),
+        }
+    } else {
+        format!("{key} = {}", format_sql_val(rest_val))
+    };
+
+    Some(clause)
 }
 
 fn format_sql_val(s: &str) -> String {
