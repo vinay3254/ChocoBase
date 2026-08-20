@@ -2114,11 +2114,17 @@ async fn handle_rest_table_crud(
 
     match method {
         "GET" => {
-            let select_cols = query_params
+            let select_param = query_params
                 .get("select")
                 .map(|s| s.as_str())
                 .unwrap_or("*");
-            let mut sql = format!("SELECT {select_cols} FROM {table}");
+            let (top_cols, embedded_rels) = parse_select_embedding(select_param);
+            let select_sql_cols = if top_cols.is_empty() {
+                "*".to_string()
+            } else {
+                top_cols.join(", ")
+            };
+            let mut sql = format!("SELECT {select_sql_cols} FROM {table}");
             let where_clauses = build_where_clauses(&query_params);
             if !where_clauses.is_empty() {
                 sql.push_str(&format!(" WHERE {}", where_clauses.join(" AND ")));
@@ -2147,7 +2153,7 @@ async fn handle_rest_table_crud(
 
             match db.execute_with_context(&sql, ctx) {
                 Ok(ExecResult::Rows { columns, rows }) => {
-                    let json_rows: Vec<serde_json::Value> = rows
+                    let mut json_rows: Vec<serde_json::Value> = rows
                         .iter()
                         .skip(offset)
                         .take(limit.unwrap_or(usize::MAX))
@@ -2159,6 +2165,50 @@ async fn handle_rest_table_crud(
                             serde_json::Value::Object(map)
                         })
                         .collect();
+
+                    if !embedded_rels.is_empty() {
+                        for row_val in &mut json_rows {
+                            if let Some(row_obj) = row_val.as_object_mut() {
+                                for rel in &embedded_rels {
+                                    let fk_candidates = [
+                                        format!("{}_id", rel.target_table),
+                                        format!("{}_id", rel.target_table.trim_end_matches('s')),
+                                        "user_id".to_string(),
+                                        "author_id".to_string(),
+                                        "parent_id".to_string(),
+                                    ];
+                                    let mut fk_val = None;
+                                    for candidate in &fk_candidates {
+                                        if let Some(val) = row_obj.get(candidate) {
+                                            fk_val = Some(val.clone());
+                                            break;
+                                        }
+                                    }
+
+                                    if let Some(fk) = fk_val {
+                                        let sub_sql = format!(
+                                            "SELECT {} FROM {} WHERE id = {} LIMIT 1",
+                                            rel.columns,
+                                            rel.target_table,
+                                            json_to_sql_literal(&fk)
+                                        );
+                                        if let Ok(ExecResult::Rows { columns: sub_cols, rows: sub_rows }) = db.execute_with_context(&sub_sql, ctx) {
+                                            if let Some(first_sub) = sub_rows.first() {
+                                                let mut sub_map = serde_json::Map::new();
+                                                for (s_idx, s_col) in sub_cols.iter().enumerate() {
+                                                    sub_map.insert(s_col.clone(), value_to_json(&first_sub[s_idx]));
+                                                }
+                                                row_obj.insert(rel.alias.clone(), serde_json::Value::Object(sub_map));
+                                            } else {
+                                                row_obj.insert(rel.alias.clone(), serde_json::Value::Null);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     (200, "OK", serde_json::Value::Array(json_rows))
                 }
                 Ok(_) => (200, "OK", serde_json::json!([])),
@@ -2432,6 +2482,82 @@ async fn handle_rest_table_crud(
             serde_json::json!({ "error": format!("method '{method}' not allowed") }),
         ),
     }
+}
+
+struct EmbeddedRelation {
+    alias: String,
+    target_table: String,
+    columns: String,
+}
+
+fn parse_select_embedding(select_str: &str) -> (Vec<String>, Vec<EmbeddedRelation>) {
+    let mut top_cols = Vec::new();
+    let mut embedded = Vec::new();
+
+    let mut current = String::new();
+    let mut depth = 0;
+
+    for c in select_str.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    if let Some((rel_def, inside)) = trimmed.split_once('(') {
+                        let rel_cols = inside.trim_end_matches(')').trim();
+                        let (alias, target_table) = if let Some((a, t)) = rel_def.split_once(':') {
+                            (a.trim(), t.trim())
+                        } else {
+                            (rel_def.trim(), rel_def.trim())
+                        };
+                        embedded.push(EmbeddedRelation {
+                            alias: alias.to_string(),
+                            target_table: target_table.to_string(),
+                            columns: if rel_cols.is_empty() || rel_cols == "*" { "*".to_string() } else { rel_cols.to_string() },
+                        });
+                    } else {
+                        top_cols.push(trimmed);
+                    }
+                }
+                current.clear();
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        if let Some((rel_def, inside)) = trimmed.split_once('(') {
+            let rel_cols = inside.trim_end_matches(')').trim();
+            let (alias, target_table) = if let Some((a, t)) = rel_def.split_once(':') {
+                (a.trim(), t.trim())
+            } else {
+                (rel_def.trim(), rel_def.trim())
+            };
+            embedded.push(EmbeddedRelation {
+                alias: alias.to_string(),
+                target_table: target_table.to_string(),
+                columns: if rel_cols.is_empty() || rel_cols == "*" { "*".to_string() } else { rel_cols.to_string() },
+            });
+        } else {
+            top_cols.push(trimmed);
+        }
+    }
+
+    if top_cols.is_empty() && embedded.is_empty() {
+        top_cols.push("*".to_string());
+    }
+
+    (top_cols, embedded)
 }
 
 fn parse_query_params(query: &str) -> HashMap<String, String> {
