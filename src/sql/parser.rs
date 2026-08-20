@@ -1078,6 +1078,14 @@ impl Parser {
                 }
                 _ => false,
             };
+            if matches!(self.peek(), Token::Identifier(ref s) if s.eq_ignore_ascii_case("nulls"))
+                || matches!(self.peek(), Token::Null)
+            {
+                self.advance();
+                if matches!(self.peek(), Token::Identifier(ref s) if s.eq_ignore_ascii_case("first") || s.eq_ignore_ascii_case("last")) {
+                    self.advance();
+                }
+            }
             Some((col, desc))
         } else {
             None
