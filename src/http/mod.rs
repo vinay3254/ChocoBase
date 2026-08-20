@@ -174,6 +174,7 @@ async fn handle_http_connection(
     let mut host_header = None;
     let mut origin_header = None;
     let mut range_header = None;
+    let mut prefer_header = None;
     let mut ws_upgrade = false;
     let mut ws_key = None;
     let mut content_length = 0usize;
@@ -196,6 +197,8 @@ async fn handle_http_connection(
                 origin_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("range") {
                 range_header = Some(v_trim.to_string());
+            } else if k_trim.eq_ignore_ascii_case("prefer") {
+                prefer_header = Some(v_trim.to_string());
             } else if k_trim.eq_ignore_ascii_case("upgrade")
                 && v_trim.eq_ignore_ascii_case("websocket")
             {
@@ -529,6 +532,8 @@ async fn handle_http_connection(
             return Ok(());
         }
     }
+
+    let mut custom_headers = String::new();
 
     let (status_code, status_text, json_body) = if method == "GET" && path == "/v1/health" {
         (
@@ -1299,7 +1304,23 @@ async fn handle_http_connection(
     } else if let Some(func_name) = path.strip_prefix("/rest/v1/rpc/").or_else(|| path.strip_prefix("/v1/rpc/")).or_else(|| path.strip_prefix("/rpc/")) {
         handle_rpc(&db, func_name, query_string, &body, &exec_ctx).await
     } else if let Some(table_name) = path.strip_prefix("/rest/v1/").or_else(|| path.strip_prefix("/v1/rest/")) {
-        handle_rest_table_crud(&db, &method, table_name, query_string, &body, &exec_ctx).await
+        let (code, text, json, cr_opt, pref_opt) = handle_rest_table_crud(
+            &db,
+            &method,
+            table_name,
+            query_string,
+            &body,
+            &exec_ctx,
+            prefer_header.as_deref(),
+        )
+        .await;
+        if let Some(cr) = cr_opt {
+            custom_headers.push_str(&format!("Content-Range: {cr}\r\nRange-Unit: items\r\n"));
+        }
+        if let Some(pa) = pref_opt {
+            custom_headers.push_str(&format!("Preference-Applied: {pa}\r\n"));
+        }
+        (code, text, json)
     } else {
         (
             404,
@@ -1346,7 +1367,7 @@ async fn handle_http_connection(
     crate::control_plane::ControlPlane::global().record_egress(project_to_meter, body_bytes.len() as u64);
 
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{cors_headers}X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{cors_headers}{custom_headers}X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status_code,
         status_text,
         content_type,
@@ -2226,7 +2247,8 @@ async fn handle_rest_table_crud(
     query_str: &str,
     body: &str,
     ctx: &ExecutionContext,
-) -> (u16, &'static str, serde_json::Value) {
+    prefer_header: Option<&str>,
+) -> (u16, &'static str, serde_json::Value, Option<String>, Option<String>) {
     let schema = match db.table_schema(table) {
         Some(s) => s,
         None => {
@@ -2234,11 +2256,15 @@ async fn handle_rest_table_crud(
                 404,
                 "Not Found",
                 serde_json::json!({ "error": format!("table '{table}' not found") }),
+                None,
+                None,
             )
         }
     };
 
     let query_params = parse_query_params(query_str);
+    let pref_str = prefer_header.map(|p| p.to_lowercase()).unwrap_or_default();
+    let is_minimal = pref_str.contains("return=minimal");
 
     match method {
         "GET" => {
@@ -2281,6 +2307,7 @@ async fn handle_rest_table_crud(
 
             match db.execute_with_context(&sql, ctx) {
                 Ok(ExecResult::Rows { columns, rows }) => {
+                    let total_count = rows.len();
                     let mut json_rows: Vec<serde_json::Value> = rows
                         .iter()
                         .skip(offset)
@@ -2298,33 +2325,30 @@ async fn handle_rest_table_crud(
                         for row_val in &mut json_rows {
                             if let Some(row_obj) = row_val.as_object_mut() {
                                 for rel in &embedded_rels {
-                                    let fk_candidates = [
-                                        format!("{}_id", rel.target_table),
-                                        format!("{}_id", rel.target_table.trim_end_matches('s')),
-                                        "user_id".to_string(),
-                                        "author_id".to_string(),
-                                        "parent_id".to_string(),
-                                    ];
-                                    let mut fk_val = None;
-                                    for candidate in &fk_candidates {
-                                        if let Some(val) = row_obj.get(candidate) {
-                                            fk_val = Some(val.clone());
-                                            break;
-                                        }
-                                    }
+                                    let rel_schema = db.table_schema(&rel.target_table);
+                                    if let Some(_target_schema) = rel_schema {
+                                        let foreign_key_col = format!("{}_id", rel.target_table);
+                                        let parent_id_val = row_obj.get("id").cloned();
+                                        let direct_fk_val = row_obj.get(&foreign_key_col).cloned()
+                                            .or_else(|| row_obj.get("user_id").cloned())
+                                            .or_else(|| row_obj.get("author_id").cloned())
+                                            .or_else(|| row_obj.get("parent_id").cloned());
 
-                                    if let Some(fk) = fk_val {
-                                        let sub_sql = format!(
-                                            "SELECT {} FROM {} WHERE id = {} LIMIT 1",
-                                            rel.columns,
-                                            rel.target_table,
-                                            json_to_sql_literal(&fk)
-                                        );
-                                        if let Ok(ExecResult::Rows { columns: sub_cols, rows: sub_rows }) = db.execute_with_context(&sub_sql, ctx) {
-                                            if let Some(first_sub) = sub_rows.first() {
+                                        let child_query = if let Some(fk) = direct_fk_val {
+                                            format!("SELECT * FROM {} WHERE id = {}", rel.target_table, json_to_sql_literal(&fk))
+                                        } else if let Some(pid) = parent_id_val {
+                                            format!("SELECT * FROM {} WHERE {}_id = {}", rel.target_table, table, json_to_sql_literal(&pid))
+                                        } else {
+                                            format!("SELECT * FROM {} LIMIT 1", rel.target_table)
+                                        };
+
+                                        if let Ok(ExecResult::Rows { columns: c_cols, rows: c_rows }) = db.execute_with_context(&child_query, ctx) {
+                                            if let Some(first_child) = c_rows.first() {
                                                 let mut sub_map = serde_json::Map::new();
-                                                for (s_idx, s_col) in sub_cols.iter().enumerate() {
-                                                    sub_map.insert(s_col.clone(), value_to_json(&first_sub[s_idx]));
+                                                for (idx, col_name) in c_cols.iter().enumerate() {
+                                                    if rel.columns.is_empty() || rel.columns.contains(col_name) {
+                                                        sub_map.insert(col_name.clone(), value_to_json(&first_child[idx]));
+                                                    }
                                                 }
                                                 row_obj.insert(rel.alias.clone(), serde_json::Value::Object(sub_map));
                                             } else {
@@ -2337,13 +2361,38 @@ async fn handle_rest_table_crud(
                         }
                     }
 
-                    (200, "OK", serde_json::Value::Array(json_rows))
+                    let is_count = pref_str.contains("count=exact")
+                        || pref_str.contains("count=planned")
+                        || pref_str.contains("count=estimated")
+                        || query_params.contains_key("count");
+
+                    let cr_opt = if is_count {
+                        if total_count == 0 {
+                            Some("*/0".to_string())
+                        } else {
+                            let from = offset;
+                            let to = (offset + json_rows.len()).saturating_sub(1).min(total_count.saturating_sub(1));
+                            Some(format!("{from}-{to}/{total_count}"))
+                        }
+                    } else {
+                        None
+                    };
+
+                    let pref_opt = if is_count {
+                        Some("count=exact".to_string())
+                    } else {
+                        None
+                    };
+
+                    (200, "OK", serde_json::Value::Array(json_rows), cr_opt, pref_opt)
                 }
-                Ok(_) => (200, "OK", serde_json::json!([])),
+                Ok(_) => (200, "OK", serde_json::json!([]), None, None),
                 Err(e) => (
                     400,
                     "Bad Request",
                     serde_json::json!({ "error": e.to_string(), "code": e.sqlstate() }),
+                    None,
+                    None,
                 ),
             }
         }
@@ -2355,6 +2404,8 @@ async fn handle_rest_table_crud(
                         400,
                         "Bad Request",
                         serde_json::json!({ "error": "invalid JSON body" }),
+                        None,
+                        None,
                     )
                 }
             };
@@ -2367,6 +2418,8 @@ async fn handle_rest_table_crud(
                         400,
                         "Bad Request",
                         serde_json::json!({ "error": "body must be JSON object or array" }),
+                        None,
+                        None,
                     )
                 }
             };
@@ -2476,18 +2529,24 @@ async fn handle_rest_table_crud(
                             400,
                             "Bad Request",
                             serde_json::json!({ "error": insert_err.to_string() }),
+                            None,
+                            None,
                         );
                     }
                 }
             }
 
-            if !returned_rows.is_empty() {
-                (201, "Created", serde_json::Value::Array(returned_rows))
+            if is_minimal {
+                (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+            } else if !returned_rows.is_empty() {
+                (201, "Created", serde_json::Value::Array(returned_rows), None, Some("return=representation".to_string()))
             } else {
                 (
                     201,
                     "Created",
                     serde_json::json!({ "status": "ok", "inserted": inserted_count }),
+                    None,
+                    None,
                 )
             }
         }
@@ -2499,6 +2558,8 @@ async fn handle_rest_table_crud(
                         400,
                         "Bad Request",
                         serde_json::json!({ "error": "invalid JSON body" }),
+                        None,
+                        None,
                     )
                 }
             };
@@ -2510,6 +2571,8 @@ async fn handle_rest_table_crud(
                         400,
                         "Bad Request",
                         serde_json::json!({ "error": "body must be JSON object" }),
+                        None,
+                        None,
                     )
                 }
             };
@@ -2524,6 +2587,8 @@ async fn handle_rest_table_crud(
                     400,
                     "Bad Request",
                     serde_json::json!({ "error": "no fields provided to update" }),
+                    None,
+                    None,
                 );
             }
 
@@ -2546,22 +2611,32 @@ async fn handle_rest_table_crud(
                             serde_json::Value::Object(map)
                         })
                         .collect();
-                    (200, "OK", serde_json::Value::Array(json_rows))
+                    if is_minimal {
+                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                    } else {
+                        (200, "OK", serde_json::Value::Array(json_rows), None, Some("return=representation".to_string()))
+                    }
                 }
-                Ok(ExecResult::Modified(n)) => (
-                    200,
-                    "OK",
-                    serde_json::json!({ "status": "ok", "modified": n }),
-                ),
-                Ok(_) => (
-                    200,
-                    "OK",
-                    serde_json::json!({ "status": "ok", "modified": 0 }),
-                ),
+                Ok(ExecResult::Modified(n)) => {
+                    if is_minimal {
+                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                    } else {
+                        (200, "OK", serde_json::json!({ "status": "ok", "modified": n }), None, None)
+                    }
+                }
+                Ok(_) => {
+                    if is_minimal {
+                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                    } else {
+                        (200, "OK", serde_json::json!({ "status": "ok", "modified": 0 }), None, None)
+                    }
+                }
                 Err(e) => (
                     400,
                     "Bad Request",
                     serde_json::json!({ "error": e.to_string() }),
+                    None,
+                    None,
                 ),
             }
         }
@@ -2585,29 +2660,41 @@ async fn handle_rest_table_crud(
                             serde_json::Value::Object(map)
                         })
                         .collect();
-                    (200, "OK", serde_json::Value::Array(json_rows))
+                    if is_minimal {
+                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                    } else {
+                        (200, "OK", serde_json::Value::Array(json_rows), None, Some("return=representation".to_string()))
+                    }
                 }
-                Ok(ExecResult::Modified(n)) => (
-                    200,
-                    "OK",
-                    serde_json::json!({ "status": "ok", "deleted": n }),
-                ),
-                Ok(_) => (
-                    200,
-                    "OK",
-                    serde_json::json!({ "status": "ok", "deleted": 0 }),
-                ),
+                Ok(ExecResult::Modified(n)) => {
+                    if is_minimal {
+                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                    } else {
+                        (200, "OK", serde_json::json!({ "status": "ok", "deleted": n }), None, None)
+                    }
+                }
+                Ok(_) => {
+                    if is_minimal {
+                        (204, "No Content", serde_json::Value::Null, None, Some("return=minimal".to_string()))
+                    } else {
+                        (200, "OK", serde_json::json!({ "status": "ok", "deleted": 0 }), None, None)
+                    }
+                }
                 Err(e) => (
                     400,
                     "Bad Request",
                     serde_json::json!({ "error": e.to_string() }),
+                    None,
+                    None,
                 ),
             }
         }
         _ => (
             405,
             "Method Not Allowed",
-            serde_json::json!({ "error": format!("method '{method}' not allowed") }),
+            serde_json::json!({ "error": "method not allowed" }),
+            None,
+            None,
         ),
     }
 }
