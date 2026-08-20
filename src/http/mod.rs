@@ -2194,6 +2194,7 @@ async fn handle_rest_table_crud(
             };
 
             let mut inserted_count = 0;
+            let mut returned_rows = Vec::new();
             for row_val in rows_to_insert {
                 let obj = match row_val.as_object() {
                     Some(o) => o,
@@ -2215,12 +2216,22 @@ async fn handle_rest_table_crud(
                 }
 
                 let sql = format!(
-                    "INSERT INTO {table} ({}) VALUES ({})",
+                    "INSERT INTO {table} ({}) VALUES ({}) RETURNING *",
                     col_names.join(", "),
                     col_values.join(", ")
                 );
 
                 match db.execute_with_context(&sql, ctx) {
+                    Ok(ExecResult::Rows { columns, rows }) => {
+                        inserted_count += rows.len();
+                        for r in rows {
+                            let mut map = serde_json::Map::new();
+                            for (idx, col_name) in columns.iter().enumerate() {
+                                map.insert(col_name.clone(), value_to_json(&r[idx]));
+                            }
+                            returned_rows.push(serde_json::Value::Object(map));
+                        }
+                    }
                     Ok(ExecResult::Modified(n)) => inserted_count += n,
                     Ok(_) => inserted_count += 1,
                     Err(insert_err) => {
@@ -2253,11 +2264,22 @@ async fn handle_rest_table_crud(
                                 }
                                 if !set_clauses.is_empty() {
                                     let update_sql = format!(
-                                        "UPDATE {table} SET {} WHERE {pk_col} = {}",
+                                        "UPDATE {table} SET {} WHERE {pk_col} = {} RETURNING *",
                                         set_clauses.join(", "),
                                         json_to_sql_literal(pk_val)
                                     );
                                     match db.execute_with_context(&update_sql, ctx) {
+                                        Ok(ExecResult::Rows { columns, rows }) => {
+                                            inserted_count += rows.len();
+                                            for r in rows {
+                                                let mut map = serde_json::Map::new();
+                                                for (idx, col_name) in columns.iter().enumerate() {
+                                                    map.insert(col_name.clone(), value_to_json(&r[idx]));
+                                                }
+                                                returned_rows.push(serde_json::Value::Object(map));
+                                            }
+                                            continue;
+                                        }
                                         Ok(ExecResult::Modified(n)) => {
                                             inserted_count += n;
                                             continue;
@@ -2281,11 +2303,15 @@ async fn handle_rest_table_crud(
                 }
             }
 
-            (
-                201,
-                "Created",
-                serde_json::json!({ "status": "ok", "inserted": inserted_count }),
-            )
+            if !returned_rows.is_empty() {
+                (201, "Created", serde_json::Value::Array(returned_rows))
+            } else {
+                (
+                    201,
+                    "Created",
+                    serde_json::json!({ "status": "ok", "inserted": inserted_count }),
+                )
+            }
         }
         "PATCH" => {
             let json_body: serde_json::Value = match serde_json::from_str(body) {
@@ -2328,8 +2354,22 @@ async fn handle_rest_table_crud(
             if !where_clauses.is_empty() {
                 sql.push_str(&format!(" WHERE {}", where_clauses.join(" AND ")));
             }
+            sql.push_str(" RETURNING *");
 
             match db.execute_with_context(&sql, ctx) {
+                Ok(ExecResult::Rows { columns, rows }) => {
+                    let json_rows: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|row| {
+                            let mut map = serde_json::Map::new();
+                            for (idx, col_name) in columns.iter().enumerate() {
+                                map.insert(col_name.clone(), value_to_json(&row[idx]));
+                            }
+                            serde_json::Value::Object(map)
+                        })
+                        .collect();
+                    (200, "OK", serde_json::Value::Array(json_rows))
+                }
                 Ok(ExecResult::Modified(n)) => (
                     200,
                     "OK",
@@ -2353,8 +2393,22 @@ async fn handle_rest_table_crud(
             if !where_clauses.is_empty() {
                 sql.push_str(&format!(" WHERE {}", where_clauses.join(" AND ")));
             }
+            sql.push_str(" RETURNING *");
 
             match db.execute_with_context(&sql, ctx) {
+                Ok(ExecResult::Rows { columns, rows }) => {
+                    let json_rows: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|row| {
+                            let mut map = serde_json::Map::new();
+                            for (idx, col_name) in columns.iter().enumerate() {
+                                map.insert(col_name.clone(), value_to_json(&row[idx]));
+                            }
+                            serde_json::Value::Object(map)
+                        })
+                        .collect();
+                    (200, "OK", serde_json::Value::Array(json_rows))
+                }
                 Ok(ExecResult::Modified(n)) => (
                     200,
                     "OK",
