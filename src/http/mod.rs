@@ -3088,15 +3088,40 @@ fn build_where_clauses(params: &HashMap<String, String>) -> Vec<String> {
 }
 
 fn format_filter_key(key: &str) -> String {
-    if let Some((col, path)) = key.split_once("->>") {
-        let clean_path = path.trim_matches('\'').trim_matches('"');
-        format!("{col}->>'{clean_path}'")
-    } else if let Some((col, path)) = key.split_once("->") {
-        let clean_path = path.trim_matches('\'').trim_matches('"');
-        format!("{col}->'{clean_path}'")
-    } else {
-        key.to_string()
+    if !key.contains("->") {
+        return key.to_string();
     }
+
+    let mut result = String::new();
+    let mut remainder = key;
+
+    let (first_col, rest) = if let Some(idx) = remainder.find("->") {
+        (&remainder[..idx], &remainder[idx..])
+    } else {
+        return key.to_string();
+    };
+
+    result.push_str(first_col);
+    remainder = rest;
+
+    while !remainder.is_empty() {
+        if let Some(after) = remainder.strip_prefix("->>") {
+            let next_arrow = after.find("->").unwrap_or(after.len());
+            let path_segment = after[..next_arrow].trim_matches('\'').trim_matches('"');
+            result.push_str(&format!("->>'{path_segment}'"));
+            remainder = &after[next_arrow..];
+        } else if let Some(after) = remainder.strip_prefix("->") {
+            let next_arrow = after.find("->").unwrap_or(after.len());
+            let path_segment = after[..next_arrow].trim_matches('\'').trim_matches('"');
+            result.push_str(&format!("->'{path_segment}'"));
+            remainder = &after[next_arrow..];
+        } else {
+            result.push_str(remainder);
+            break;
+        }
+    }
+
+    result
 }
 
 fn parse_single_filter(key: &str, val: &str) -> Option<String> {
