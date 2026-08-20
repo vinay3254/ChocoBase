@@ -1,0 +1,14 @@
+name: chocobase
+description: Official Dart and Flutter client library for ChocoBase database platform.
+version: 0.1.0
+homepage: https://github.com/vinay3254/ChocoBase
+
+environment:
+  sdk: '>=2.17.0 <4.0.0'
+
+dependencies:
+  http: ^1.1.0
+  web_socket_channel: ^2.4.0
+
+dev_dependencies:
+  test: ^1.24.0
