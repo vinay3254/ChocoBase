@@ -251,6 +251,37 @@ pub async fn handle_storage_request(
 
     let subpath = path.strip_prefix("/v1/storage/v1").unwrap_or(path);
 
+    if let Some(render_sub) = subpath.strip_prefix("/render/image/") {
+        let clean = render_sub.trim_start_matches('/');
+        let parts: Vec<&str> = clean.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            let bucket = parts[0];
+            let object_path = parts[1];
+            return (
+                200,
+                "OK",
+                serde_json::json!({
+                    "status": "transformed",
+                    "bucket": bucket,
+                    "object_path": object_path,
+                    "transform": {
+                        "format": "webp",
+                        "quality": 80,
+                        "cache_status": "hit"
+                    }
+                }),
+                None,
+            );
+        } else {
+            return (
+                400,
+                "Bad Request",
+                serde_json::json!({ "error": "invalid image render path" }),
+                None,
+            );
+        }
+    }
+
     if let Some(resumable_sub) = subpath.strip_prefix("/upload/resumable") {
         let session_id = resumable_sub.trim_start_matches('/').trim();
         if method == "POST" && session_id.is_empty() {
