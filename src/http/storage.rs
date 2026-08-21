@@ -564,7 +564,7 @@ pub async fn handle_storage_request(
             let secret = crate::auth::jwt_secret();
             let token = sign_download_token(&bucket_id, &object_key, expires_at, &secret);
             let signed_url = format!(
-                "/v1/storage/v1/object/{bucket_id}/{object_key}?token={token}&expires={expires_at}"
+                "/storage/v1/object/sign/{bucket_id}/{object_key}?token={token}&expires={expires_at}"
             );
 
             return (
@@ -961,7 +961,11 @@ pub async fn handle_storage_request(
             )
         }
     } else if let Some(obj_subpath) = subpath.strip_prefix("/object/") {
-        let clean_subpath = obj_subpath.strip_prefix("public/").unwrap_or(obj_subpath);
+        let clean_subpath = obj_subpath
+            .strip_prefix("public/")
+            .or_else(|| obj_subpath.strip_prefix("sign/"))
+            .or_else(|| obj_subpath.strip_prefix("authenticated/"))
+            .unwrap_or(obj_subpath);
 
         if let Some((bucket_id, object_key)) = clean_subpath.split_once('/') {
             let bucket_id = sanitize_object_path(bucket_id);
