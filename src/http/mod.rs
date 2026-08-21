@@ -1429,6 +1429,7 @@ async fn handle_http_connection(
             prefer_header.as_deref(),
             accept_header.as_deref(),
             schema_profile,
+            range_header.as_deref(),
         )
         .await;
         if let Some(prof) = schema_profile {
@@ -2387,6 +2388,7 @@ async fn handle_rest_table_crud(
     prefer_header: Option<&str>,
     accept_header: Option<&str>,
     schema_profile: Option<&str>,
+    range_header: Option<&str>,
 ) -> (u16, &'static str, serde_json::Value, Option<String>, Option<String>) {
     let resolved_table = if let Some(prof) = schema_profile {
         if !table.contains('.') && prof != "public" {
@@ -2489,13 +2491,28 @@ async fn handle_rest_table_crud(
                 sql.push_str(&parse_postgrest_order(order));
             }
 
-            let offset = query_params
-                .get("offset")
-                .and_then(|s| s.parse::<usize>().ok())
+            let (range_offset, range_limit) = if let Some(rh) = range_header {
+                let clean = rh.trim_start_matches("items=").trim();
+                if let Some((start_s, end_s)) = clean.split_once('-') {
+                    let start = start_s.trim().parse::<usize>().ok();
+                    let end = end_s.trim().parse::<usize>().ok();
+                    match (start, end) {
+                        (Some(s), Some(e)) if e >= s => (Some(s), Some(e - s + 1)),
+                        (Some(s), None) => (Some(s), None),
+                        _ => (None, None),
+                    }
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+
+            let offset = range_offset
+                .or_else(|| query_params.get("offset").and_then(|s| s.parse::<usize>().ok()))
                 .unwrap_or(0);
-            let limit = query_params
-                .get("limit")
-                .and_then(|s| s.parse::<usize>().ok());
+            let limit = range_limit
+                .or_else(|| query_params.get("limit").and_then(|s| s.parse::<usize>().ok()));
 
             match db.execute_with_context(&sql, ctx) {
                 Ok(ExecResult::Rows { columns, rows }) => {
@@ -2558,7 +2575,9 @@ async fn handle_rest_table_crud(
                         || pref_str.contains("count=estimated")
                         || query_params.contains_key("count");
 
-                    let cr_opt = if is_count {
+                    let is_ranged = range_header.is_some() || is_count || offset > 0 || limit.is_some();
+
+                    let cr_opt = if is_ranged {
                         if total_count == 0 {
                             Some("*/0".to_string())
                         } else {
@@ -2570,12 +2589,18 @@ async fn handle_rest_table_crud(
                         None
                     };
 
+                    let (status_code, status_text) = if range_header.is_some() && json_rows.len() < total_count {
+                        (206, "Partial Content")
+                    } else {
+                        (200, "OK")
+                    };
+
                     let pref_opt = build_pref_applied(None);
 
                     if is_single_object {
                         if json_rows.len() == 1 {
                             let single_val = json_rows.into_iter().next().unwrap();
-                            (200, "OK", single_val, cr_opt, pref_opt)
+                            (status_code, status_text, single_val, cr_opt, pref_opt)
                         } else {
                             let count_str = format!("The result contains {} rows", json_rows.len());
                             (
@@ -2592,7 +2617,7 @@ async fn handle_rest_table_crud(
                             )
                         }
                     } else {
-                        (200, "OK", serde_json::Value::Array(json_rows), cr_opt, pref_opt)
+                        (status_code, status_text, serde_json::Value::Array(json_rows), cr_opt, pref_opt)
                     }
                 }
                 Ok(_) => (200, "OK", serde_json::json!([]), None, build_pref_applied(None)),
